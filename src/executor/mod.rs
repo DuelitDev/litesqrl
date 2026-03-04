@@ -130,8 +130,9 @@ use std::collections::HashMap;
 
 pub struct ColumnId(pub u64);
 pub struct RowId(pub u64);
-pub struct TableId(pub u64);
 
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+pub struct TableId(pub u64);
 
 pub enum QueryResult {
     Rows(Vec<Vec<String>>),
@@ -162,19 +163,17 @@ impl Executor {
         let stmts = stmts.unwrap();
         for stmt in stmts {
             match stmt {
-                _ => self.execute_simple(stmt),
+                Stmt::Create { table, columns, .. } => {
+                    println!("Creating table: {}", table);
+                }
+                Stmt::InsertValues { table, values, .. } => {
+                    println!("Inserting data into: {}", table);
+                }
+                _ => {
+                    println!("Other statement: {:?}", stmt);
+                }
             }
         }
         QueryResult::Success
-    }
-
-    pub fn execute_simple(&self, stmt: Stmt) {
-        if let Stmt::Create { table, columns, .. } = stmt {
-            println!("Creating table: {}", table);
-        } else if let Stmt::InsertValues { table, values, .. } = stmt {
-            println!("Inserting data into: {}", table);
-        } else {
-            println!("Unsupported statement");
-        }
     }
 }

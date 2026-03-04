@@ -8,11 +8,18 @@ pub struct VarChar {
     data: [char; VAR_CHAR_CAPACITY],
 }
 
+#[derive(Debug)]
 pub struct StringTooLong;
 
 impl VarChar {
     pub fn as_slice(&self) -> &[char] {
         &self.data[0..self.length as usize]
+    }
+
+    pub fn as_bytes(&self) -> [u8; VAR_CHAR_CAPACITY * std::mem::size_of::<char>()] {
+        let mut copy = self.data;
+        copy[self.length as usize..].fill(char::default());
+        unsafe { std::mem::transmute(copy) }
     }
 }
 
@@ -26,20 +33,19 @@ impl Display for VarChar {
     }
 }
 
-impl TryFrom<String> for VarChar {
+impl TryFrom<&str> for VarChar {
     type Error = StringTooLong;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         if value.len() > VAR_CHAR_CAPACITY {
             return Err(StringTooLong);
         }
         let length = value.len() as u8;
 
         let mut data = [char::default(); VAR_CHAR_CAPACITY];
-        for (data, dest) in value.chars().zip(data.iter_mut()) {
-            *dest = data;
+        for (ch, dest) in value.chars().zip(data.iter_mut()) {
+            *dest = ch;
         }
-
         Ok(Self { length, data })
     }
 }
