@@ -125,8 +125,10 @@ Delta의 성별이 누락되었으니, 이를 갱신해봅시다.
 */
 
 use crate::query::{Expr, Lexer, Parser, Stmt};
-use crate::storage::{DataType, DataValue};
-use std::collections::HashMap;
+use crate::storage::{
+    DataValue, create_column, create_row, create_table, get_table_hash, read_all_rows, read_schema,
+};
+use crate::var_char::VarChar;
 
 pub struct ColumnId(pub u64);
 pub struct RowId(pub u64);
@@ -141,19 +143,42 @@ pub enum QueryResult {
     Error(String),
 }
 
-pub struct Executor {
-    //          table name, column name,      column type
-    mock: HashMap<String, (Vec<DataType>, Vec<Vec<DataValue>>)>,
+pub struct TableView {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
 }
+
+pub struct Executor;
 
 impl Executor {
     pub fn new() -> Self {
-        Self {
-            mock: HashMap::new(),
+        Self
+    }
+
+    fn format_value(&self, value: &DataValue) -> String {
+        match value {
+            DataValue::Int(i) => i.to_string(),
+            DataValue::Float(f) => f.to_string(),
+            DataValue::Bool(b) => b.to_string(),
+            DataValue::VChar(s) => s.to_string(),
         }
     }
 
-    pub fn run(&mut self, src: String) -> QueryResult {
+    fn eval_expr(&self, expr: &Expr) -> DataValue {
+        match expr {
+            Expr::Int(i) => DataValue::Int(*i),
+            Expr::Bool(b) => DataValue::Bool(*b),
+            Expr::Float(f) => DataValue::Float(*f),
+            Expr::Text(s) => DataValue::VChar(
+                VarChar::try_from(s.as_ref())
+                    .unwrap_or_else(|_| panic!("String too long for VarChar: '{}'", s)),
+            ),
+            _ => unimplemented!("Expression type not supported yet"),
+        }
+    }
+
+    pub async fn run(&mut self, src: String) -> QueryResult {
         let lexer = Lexer::new(&src);
         let parser = Parser::new(lexer);
         let stmts = parser.unwrap().parse(); // TODO: 오류 처리
@@ -165,9 +190,44 @@ impl Executor {
             match stmt {
                 Stmt::Create { table, columns, .. } => {
                     println!("Creating table: {}", table);
+                    let table_id = match create_table(table.to_string()).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return QueryResult::Error(format!(
+                                "Failed to create table '{}': {}",
+                                table, e
+                            ));
+                        }
+                    };
+                    for (col_name, col_type) in columns {
+                        println!("  Column: {} ({:?})", col_name, col_type);
+                        let Ok(_) = create_column(table_id, col_name.to_string(), col_type).await
+                        else {
+                            return QueryResult::Error(format!(
+                                "Failed to create column: {} ({:?})",
+                                col_name, col_type
+                            ));
+                        };
+                    }
                 }
-                Stmt::InsertValues { table, values, .. } => {
+                Stmt::InsertValues { table, rows, .. } => {
                     println!("Inserting data into: {}", table);
+                    let table_id = get_table_hash(&table);
+                    // Vec<Expr> [1 + [1 * 2]]
+
+                    for values in rows {
+                        println!("  Row: {:?}", values);
+                        let values = values.iter().map(|v| self.eval_expr(v)).collect::<Vec<_>>();
+                        match create_row(table_id, values).await {
+                            Ok(_) => (),
+                            Err(e) => {
+                                return QueryResult::Error(format!(
+                                    "Failed to insert row into '{}': {}",
+                                    table, e
+                                ));
+                            }
+                        }
+                    }
                 }
                 _ => {
                     println!("Other statement: {:?}", stmt);
@@ -175,5 +235,33 @@ impl Executor {
             }
         }
         QueryResult::Success
+    }
+
+    pub async fn load_table(&self, table_name: &str) -> Result<TableView, String> {
+        let table_id = get_table_hash(table_name);
+
+        let (_, name, columns_info) = read_schema(table_id)
+            .await
+            .map_err(|err| format!("Failed to read schema for table '{}': {}", table_name, err))?;
+
+        let columns = columns_info
+            .into_iter()
+            .map(|(_, _, col_name)| col_name)
+            .collect::<Vec<_>>();
+
+        let rows_data = read_all_rows(table_id)
+            .await
+            .map_err(|err| format!("Failed to load rows for table '{}': {}", table_name, err))?;
+
+        let rows = rows_data
+            .iter()
+            .map(|row| row.iter().map(|value| self.format_value(value)).collect())
+            .collect();
+
+        Ok(TableView {
+            name,
+            columns,
+            rows,
+        })
     }
 }

@@ -1,5 +1,6 @@
 use super::error::{QueryErr, Result};
 use super::lexer::{Lexer, Token};
+use crate::storage::DataType;
 use std::mem::{discriminant, replace};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8,14 +9,14 @@ pub enum Stmt {
     // CREATE TABLE [IF NOT EXISTS] <table> (<col1> <type>, <col2> <type>, ...)
     Create {
         table: Box<str>,                    // table name
-        columns: Vec<(Box<str>, Box<str>)>, // col name, col type
+        columns: Vec<(Box<str>, DataType)>, // col name, col type
         if_not_exists: bool,                // run if not exists
     },
     // INSERT INTO <table> [(<col1>, <col2>, ...)] VALUES (<val1>, <val2>, ...)
     InsertValues {
         table: Box<str>,        // table name
         columns: Vec<Box<str>>, // col name
-        values: Vec<Vec<Expr>>, // row [val expr]
+        rows: Vec<Vec<Expr>>, // row [val expr]
     },
     // SELECT [DISTINCT] <col1>, <col2>, ... FROM <table>
     //     [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT]
@@ -37,7 +38,7 @@ pub enum Stmt {
     },
     AlterAdd {
         table: Box<str>,              // table name
-        column: (Box<str>, Box<str>), // col name, col type
+        column: (Box<str>, DataType), // col name, col type
     },
     AlterDrop {
         table: Box<str>,  // table name
@@ -75,7 +76,7 @@ pub enum Clause {
     Values(Vec<Expr>),               // expr
     Columns(Vec<Box<str>>),          // col name
     Assigns(Vec<(Box<str>, Expr)>),  // col name, expr
-    Defs(Vec<(Box<str>, Box<str>)>), // col name, col type
+    Defs(Vec<(Box<str>, DataType)>), // col name, col type
     OrderBy(Vec<(Box<Expr>, bool)>), // bool: true=ASC, false=DESC
     Where(Box<Expr>),
     Limit(u64),
@@ -100,7 +101,7 @@ impl Clause {
     as_clause!(as_values, Values, Vec<Expr>);
     as_clause!(as_columns, Columns, Vec<Box<str>>);
     as_clause!(as_assigns, Assigns, Vec<(Box<str>, Expr)>);
-    as_clause!(as_defs, Defs, Vec<(Box<str>, Box<str>)>);
+    as_clause!(as_defs, Defs, Vec<(Box<str>, DataType)>);
     as_clause!(as_order_by, OrderBy, Vec<(Box<Expr>, bool)>);
     as_clause!(as_where, Where, Expr);
     as_clause!(as_limit, Limit, u64);
@@ -265,12 +266,12 @@ impl Parser {
 
     fn parse_insert_values(&mut self, table: Box<str>, columns: Vec<Box<str>>) -> Result<Stmt> {
         // ... VALUES (<val1>, <val2>, ...)
-        let values =
+        let rows =
             self.parse_list_clause(false, |p| p.parse_list_clause(true, |p| p.parse_expr(0)))?;
         Ok(Stmt::InsertValues {
             table,
             columns,
-            values,
+            rows,
         })
     }
 
@@ -423,12 +424,12 @@ impl Parser {
         }
     }
 
-    fn consume_type(&mut self) -> Result<Box<str>> {
+    fn consume_type(&mut self) -> Result<DataType> {
         match self.next()? {
-            Token::BoolType => Ok("BOOLEAN".into()),
-            Token::IntType => Ok("INTEGER".into()),
-            Token::FloatType => Ok("FLOAT".into()),
-            Token::TextType => Ok("TEXT".into()),
+            Token::BoolType => Ok(DataType::Bool),
+            Token::IntType => Ok(DataType::Int),
+            Token::FloatType => Ok(DataType::Float),
+            Token::TextType => Ok(DataType::VChar),
             tok => Err(QueryErr::UnexpectedToken {
                 expected: "type".into(),
                 found: format!("{:?}", tok),
@@ -511,8 +512,8 @@ mod tests {
             } => {
                 assert_eq!(table.as_ref(), "users");
                 assert_eq!(columns.len(), 2);
-                assert_eq!(columns[0], ("id".into(), "INTEGER".into()));
-                assert_eq!(columns[1], ("name".into(), "TEXT".into()));
+                assert_eq!(columns[0], ("id".into(), DataType::Int));
+                assert_eq!(columns[1], ("name".into(), DataType::VChar));
                 assert!(!if_not_exists);
             }
             _ => panic!("Expected Create stmt"),
@@ -528,6 +529,7 @@ mod tests {
             } => {
                 assert_eq!(table.as_ref(), "items");
                 assert_eq!(columns.len(), 1);
+                assert_eq!(columns[0], ("price".into(), DataType::Float));
                 assert!(if_not_exists);
             }
             _ => panic!("Expected Create stmt"),
@@ -542,14 +544,14 @@ mod tests {
             Stmt::InsertValues {
                 table,
                 columns,
-                values,
+                rows,
             } => {
                 assert_eq!(table.as_ref(), "users");
                 assert!(columns.is_empty()); // 컬럼 명시 안함
-                assert_eq!(values.len(), 1); // 1 row
-                assert_eq!(values[0].len(), 2);
-                assert_eq!(values[0][0], Expr::Int(1));
-                assert_eq!(values[0][1], Expr::Text("Alice".into()));
+                assert_eq!(rows.len(), 1); // 1 row
+                assert_eq!(rows[0].len(), 2);
+                assert_eq!(rows[0][0], Expr::Int(1));
+                assert_eq!(rows[0][1], Expr::Text("Alice".into()));
             }
             _ => panic!("Expected InsertValues stmt"),
         }
@@ -561,13 +563,13 @@ mod tests {
             Stmt::InsertValues {
                 table,
                 columns,
-                values,
+                rows,
             } => {
                 assert_eq!(table.as_ref(), "users");
                 assert_eq!(columns.len(), 2);
                 assert_eq!(columns[0].as_ref(), "id");
                 assert_eq!(columns[1].as_ref(), "name");
-                assert_eq!(values.len(), 1);
+                assert_eq!(rows.len(), 1);
             }
             _ => panic!("Expected InsertValues stmt"),
         }
@@ -632,7 +634,7 @@ mod tests {
         match stmt {
             Stmt::AlterAdd { table, column } => {
                 assert_eq!(table.as_ref(), "users");
-                assert_eq!(column, ("age".into(), "INTEGER".into()));
+                assert_eq!(column, ("age".into(), DataType::Int));
             }
             _ => panic!("Expected AlterAdd stmt"),
         }

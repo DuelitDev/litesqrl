@@ -16,7 +16,8 @@ struct Args {
     database: Option<PathBuf>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
     // 데이터베이스 유무 체크
     if let None = args.database {
@@ -52,7 +53,7 @@ fn main() {
                 buffer.push_str(&input);
                 let src = std::mem::take(&mut buffer);
                 println!("{}", src);
-                exec.run(src);
+                exec.run(src).await;
             }
         } else {
             println!("Failed to read line.");

@@ -12,7 +12,7 @@ pub enum DataType {
     Int = 11,
     Float = 12,
     Bool = 13,
-    String = 14,
+    VChar = 14,
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -29,7 +29,7 @@ impl DataType {
             DataType::Int => "Int",
             DataType::Float => "Float",
             DataType::Bool => "Bool",
-            DataType::String => "String",
+            DataType::VChar => "VarChar",
         }
     }
 
@@ -38,7 +38,7 @@ impl DataType {
             "Int" => Ok(DataType::Int),
             "Float" => Ok(DataType::Float),
             "Bool" => Ok(DataType::Bool),
-            "String" => Ok(DataType::String),
+            "VarChar" => Ok(DataType::VChar),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown data type: {value}"),
@@ -51,7 +51,7 @@ impl DataType {
             DataType::Int => std::mem::size_of::<i64>() as u64,
             DataType::Float => std::mem::size_of::<f64>() as u64,
             DataType::Bool => std::mem::size_of::<u8>() as u64,
-            DataType::String => (crate::var_char::VAR_CHAR_CAPACITY * std::mem::size_of::<char>()) as u64,
+            DataType::VChar => (crate::var_char::VAR_CHAR_CAPACITY * std::mem::size_of::<char>()) as u64,
         }
     }
 }
@@ -62,7 +62,7 @@ impl DataValue {
             DataValue::Int(_) => DataType::Int == data_type,
             DataValue::Float(_) => DataType::Float == data_type,
             DataValue::Bool(_) => DataType::Bool == data_type,
-            DataValue::VChar(_) => DataType::String == data_type,
+            DataValue::VChar(_) => DataType::VChar == data_type,
         }
     }
 }
@@ -175,7 +175,7 @@ pub fn get_table_hash(name: &str) -> TableId {
     TableId(hasher.finish())
 }
 
-async fn read_schema(
+pub async fn read_schema(
     table_id: TableId,
 ) -> io::Result<(u64, String, Vec<(ColumnId, DataType, String)>)> {
     let mut schema_file = fs::File::open(format!("{}/schema", table_id.0)).await?;
@@ -242,7 +242,7 @@ async fn read_data(fd: &mut fs::File, data_type: DataType) -> io::Result<DataVal
             fd.read_exact(&mut buf).await?;
             Ok(DataValue::Bool(buf[0] != 0))
         }
-        DataType::String => {
+        DataType::VChar => {
             let mut buf = [0u8; crate::var_char::VAR_CHAR_CAPACITY * std::mem::size_of::<char>()];
             fd.read_exact(&mut buf).await?;
 
@@ -295,6 +295,29 @@ pub async fn read_row(table_id: TableId, row_id: RowId) -> io::Result<Vec<DataVa
     Ok(row)
 }
 
+pub async fn read_all_rows(table_id: TableId) -> io::Result<Vec<Vec<DataValue>>> {
+    let (last_id, _table_name, columns) = read_schema(table_id).await?;
+    let row_files_cnt = (last_id + ROWS_PER_FILE - 1) / ROWS_PER_FILE;
+    let mut rows = Vec::with_capacity(last_id as usize);
+    for i in 0..row_files_cnt {
+        let mut data_file = fs::File::open(format!("{}/{}", table_id.0, i)).await?;
+        let rows_in_file = if i == row_files_cnt - 1 {
+            (last_id - i * ROWS_PER_FILE) as usize
+        } else {
+            ROWS_PER_FILE as usize
+        };
+        for _ in 0..rows_in_file {
+            let mut row = Vec::with_capacity(columns.len());
+            for col in columns.iter() {
+                let data = read_data(&mut data_file, col.1).await?;
+                row.push(data);
+            }
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
 mod test {
     use super::*;
     #[tokio::test]
@@ -302,7 +325,7 @@ mod test {
         std::fs::remove_dir_all("6025841138654200372").unwrap();
         let table_id = create_table("users".to_string()).await.unwrap();
         println!("Created table with ID: {}", table_id.0);
-        create_column(table_id, "name".to_string(), DataType::String)
+        create_column(table_id, "name".to_string(), DataType::VChar)
             .await
             .unwrap();
         create_column(table_id, "age".to_string(), DataType::Int)
