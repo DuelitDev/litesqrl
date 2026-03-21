@@ -12,10 +12,10 @@ pub enum Token {
     Float(f64),
     Text(String),
     // 타입
-    BoolType,  // BOOL, BOOLEAN
-    IntType,   // INT, INTEGER
-    FloatType, // FLOAT, DOUBLE
-    TextType,  // TEXT, STRING, VARCHAR
+    IntType,  // INT, INTEGER
+    RealType, // FLOAT, DOUBLE
+    BoolType, // BOOL, BOOLEAN
+    TextType, // TEXT, STRING, VARCHAR
     // 식별자
     Ident(String),
     // 키워드
@@ -240,9 +240,9 @@ impl Lexer {
             "TRUE" => Token::Bool(true),
             "FALSE" => Token::Bool(false),
             // 타입
-            "BOOL" | "BOOLEAN" => Token::BoolType,
             "INT" | "INTEGER" => Token::IntType,
-            "FLOAT" | "DOUBLE" => Token::FloatType,
+            "FLOAT" | "DOUBLE" => Token::RealType,
+            "BOOL" | "BOOLEAN" => Token::BoolType,
             "TEXT" | "STRING" | "VARCHAR" => Token::TextType,
             // 키워드
             "CREATE" => Token::Create,

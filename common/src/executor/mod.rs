@@ -7,12 +7,6 @@ pub enum QueryResult {
     Error(String),
 }
 
-pub struct TableView {
-    pub name: String,
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
-}
-
 pub struct Executor;
 
 impl Executor {

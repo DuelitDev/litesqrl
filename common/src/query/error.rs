@@ -7,10 +7,10 @@ pub enum QueryErr {
     UnexpectedEof,
     InvalidNum(String),
     UnterminatedText,
-    InvalidIdent(String),
     InvalidToken(char),
-    UnexpectedToken { expected: String, found: String },
+    InvalidIdent(String),
     InvalidExpr(String),
+    UnexpectedToken { expected: String, found: String },
 }
 
 impl fmt::Display for QueryErr {
@@ -19,12 +19,12 @@ impl fmt::Display for QueryErr {
             Self::UnexpectedEof => write!(f, "Unexpected end of file while parsing"),
             Self::InvalidNum(s) => write!(f, "Invalid number format: '{}'", s),
             Self::UnterminatedText => write!(f, "Unterminated text literal"),
-            Self::InvalidIdent(i) => write!(f, "Invalid identifier: '{}'", i),
             Self::InvalidToken(c) => write!(f, "Invalid character: '{}'", c),
+            Self::InvalidIdent(i) => write!(f, "Invalid identifier: '{}'", i),
+            Self::InvalidExpr(e) => write!(f, "Invalid expression: {}", e),
             Self::UnexpectedToken { expected, found } => {
                 write!(f, "Expected {}, but found {}", expected, found)
             }
-            Self::InvalidExpr(e) => write!(f, "Invalid expression: {}", e),
         }
     }
 }

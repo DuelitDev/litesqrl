@@ -1,7 +1,14 @@
-use super::ValType;
 use super::error::{QueryErr, Result};
 use super::lexer::{Lexer, Token};
 use std::mem::{discriminant, replace};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValType {
+    Int,
+    Real,
+    Bool,
+    Text,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -37,7 +44,7 @@ pub enum Stmt {
         where_clause: Option<Expr>,     // condition expr
     },
     AlterAdd {
-        table: Box<str>,              // table name
+        table: Box<str>,             // table name
         column: (Box<str>, ValType), // col name, col type
     },
     AlterDrop {
@@ -76,7 +83,7 @@ pub enum Clause {
     Values(Vec<Expr>),               // expr
     Columns(Vec<Box<str>>),          // col name
     Assigns(Vec<(Box<str>, Expr)>),  // col name, expr
-    Defs(Vec<(Box<str>, ValType)>), // col name, col type
+    Defs(Vec<(Box<str>, ValType)>),  // col name, col type
     OrderBy(Vec<(Box<Expr>, bool)>), // bool: true=ASC, false=DESC
     Where(Box<Expr>),
     Limit(u64),
@@ -400,10 +407,10 @@ impl Parser {
 
     fn consume_type(&mut self) -> Result<ValType> {
         match self.next()? {
-            Token::BoolType => Ok(ValType::Bool),
             Token::IntType => Ok(ValType::Int),
-            Token::FloatType => Ok(ValType::Float),
-            Token::TextType => Ok(ValType::String),
+            Token::RealType => Ok(ValType::Real),
+            Token::BoolType => Ok(ValType::Bool),
+            Token::TextType => Ok(ValType::Text),
             tok => Err(QueryErr::UnexpectedToken {
                 expected: "type".into(),
                 found: format!("{:?}", tok),
@@ -483,7 +490,7 @@ mod tests {
                 assert_eq!(table.as_ref(), "users");
                 assert_eq!(columns.len(), 2);
                 assert_eq!(columns[0], ("id".into(), ValType::Int));
-                assert_eq!(columns[1], ("name".into(), ValType::String));
+                assert_eq!(columns[1], ("name".into(), ValType::Text));
                 assert!(!if_not_exists);
             }
             _ => panic!("Expected Create stmt"),
@@ -495,7 +502,7 @@ mod tests {
             Stmt::Create { table, columns, if_not_exists } => {
                 assert_eq!(table.as_ref(), "items");
                 assert_eq!(columns.len(), 1);
-                assert_eq!(columns[0], ("price".into(), ValType::Float));
+                assert_eq!(columns[0], ("price".into(), ValType::Real));
                 assert!(if_not_exists);
             }
             _ => panic!("Expected Create stmt"),
