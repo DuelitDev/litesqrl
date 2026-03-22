@@ -1,6 +1,6 @@
 use super::error::{QueryErr, QueryErrKind, Result};
 use super::lexer::{Lexer, SpannedToken, Token};
-use crate::schema::ValType;
+use crate::schema::DataType;
 use std::mem::{discriminant, replace};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8,9 +8,9 @@ use std::mem::{discriminant, replace};
 pub enum Stmt {
     // CREATE TABLE [IF NOT EXISTS] <table> (<col1> <type>, <col2> <type>, ...)
     Create {
-        table: Box<str>,                   // table name
-        columns: Vec<(Box<str>, ValType)>, // col name, col type
-        if_not_exists: bool,               // run if not exists
+        table: Box<str>,                    // table name
+        columns: Vec<(Box<str>, DataType)>, // col name, col type
+        if_not_exists: bool,                // run if not exists
     },
     // INSERT INTO <table> [(<col1>, <col2>, ...)] VALUES (<val1>, <val2>, ...)
     InsertValues {
@@ -37,8 +37,8 @@ pub enum Stmt {
         where_clause: Option<Expr>,     // condition expr
     },
     AlterAdd {
-        table: Box<str>,             // table name
-        column: (Box<str>, ValType), // col name, col type
+        table: Box<str>,              // table name
+        column: (Box<str>, DataType), // col name, col type
     },
     AlterDrop {
         table: Box<str>,  // table name
@@ -383,13 +383,13 @@ impl Parser {
         }
     }
 
-    fn consume_type(&mut self) -> Result<ValType> {
+    fn consume_type(&mut self) -> Result<DataType> {
         let spanned = self.next()?;
         match spanned.token {
-            Token::IntType => Ok(ValType::Int),
-            Token::RealType => Ok(ValType::Real),
-            Token::BoolType => Ok(ValType::Bool),
-            Token::TextType => Ok(ValType::Text),
+            Token::IntType => Ok(DataType::Int),
+            Token::RealType => Ok(DataType::Real),
+            Token::BoolType => Ok(DataType::Bool),
+            Token::TextType => Ok(DataType::Text),
             tok => Err(QueryErr {
                 kind: QueryErrKind::UnexpectedToken {
                     expected: "type".into(),

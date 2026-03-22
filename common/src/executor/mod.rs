@@ -1,6 +1,6 @@
 pub mod result;
 
-use crate::query::parser::ValType;
+use crate::query::schema::ValType;
 use crate::query::{Expr, Lexer, Parser, Stmt};
 use crate::storage::Storage;
 use crate::storage::types::{DataType, DataValue};
