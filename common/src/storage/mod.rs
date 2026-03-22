@@ -1,13 +1,14 @@
 mod codec;
-mod error;
 mod header;
-mod meta;
 mod record;
-mod types;
+
+pub mod error;
+pub mod meta;
+pub mod types;
 
 use error::{Result, StorageErr};
 use header::FileHeader;
-use meta::TableMeta;
+use meta::{ColumnMeta, TableMeta};
 use record::*;
 use std::collections::HashMap;
 use std::fs::File;
@@ -115,6 +116,22 @@ impl Storage {
         Ok(())
     }
 
+    pub fn table_exists(&self, name: &str) -> bool {
+        self.table_names.contains_key(name)
+    }
+
+    pub fn resolve_table(&self, name: &str) -> Result<&TableMeta> {
+        let table = self
+            .table_names
+            .get(name)
+            .copied()
+            .ok_or(StorageErr::InvalidSchema("table not found"))?;
+        match self.tables.get(&table) {
+            Some(meta) if meta.alive => Ok(meta),
+            _ => Err(StorageErr::TableNotFound(table)),
+        }
+    }
+
     pub fn create_column(
         &mut self,
         table: TableId,
@@ -138,8 +155,19 @@ impl Storage {
         todo!("drop_column")
     }
 
-    pub fn columns(&self, table: TableId) -> Result<Vec<ColumnId>> {
-        todo!("columns")
+    pub fn resolve_columns(&self, table: TableId) -> Result<&[ColumnMeta]> {
+        match self.tables.get(&table) {
+            Some(meta) if meta.alive => Ok(&meta.columns),
+            _ => Err(StorageErr::TableNotFound(table)),
+        }
+    }
+
+    pub fn resolve_column(&self, table: TableId, name: &str) -> Result<&ColumnMeta> {
+        let columns = self.resolve_columns(table)?;
+        columns
+            .iter()
+            .find(|c| &*c.name == name)
+            .ok_or(StorageErr::InvalidSchema("column not found"))
     }
 
     pub fn insert_row(
@@ -163,8 +191,15 @@ impl Storage {
         todo!("delete_row")
     }
 
-    pub fn rows(&self, table: TableId) -> Result<Vec<RowId>> {
-        todo!("rows")
+    pub fn iter_rows(
+        &self,
+        table: TableId,
+    ) -> Result<impl Iterator<Item = (RowId, &HashMap<ColumnId, DataValue>)>> {
+        let meta = match self.tables.get(&table) {
+            Some(m) if m.alive => m,
+            _ => return Err(StorageErr::TableNotFound(table)),
+        };
+        Ok(meta.rows.iter().filter(|(_, s)| s.alive).map(|(id, s)| (*id, &s.values)))
     }
 }
 

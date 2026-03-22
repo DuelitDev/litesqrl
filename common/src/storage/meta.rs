@@ -1,7 +1,16 @@
 use super::types::{ColumnId, DataType, DataValue, RowId, TableId};
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct TableMeta {
+    pub id: TableId,
+    pub name: Box<str>,
+    pub alive: bool,
+    pub columns: Vec<ColumnMeta>,
+    pub rows: HashMap<RowId, RowState>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ColumnMeta {
     pub id: ColumnId,
     pub name: Box<str>,
@@ -9,17 +18,8 @@ pub struct ColumnMeta {
     pub alive: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RowState {
     pub alive: bool,
     pub values: HashMap<ColumnId, DataValue>,
-}
-
-#[derive(Debug)]
-pub struct TableMeta {
-    pub id: TableId,
-    pub name: Box<str>,
-    pub alive: bool,
-    pub columns: Vec<ColumnMeta>,
-    pub rows: HashMap<RowId, RowState>,
 }
