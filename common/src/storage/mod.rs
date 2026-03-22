@@ -1,48 +1,118 @@
+mod codec;
+mod error;
+mod header;
+mod meta;
+mod record;
+mod types;
+
+use error::{Result, StorageErr};
+use header::FileHeader;
+use meta::TableMeta;
+use record::*;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
+use types::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TableId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ColumnId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RowId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DataType {
-    Int,
-    Real,
-    Bool,
-    Text,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum DataValue {
-    Int(i64),
-    Real(f64),
-    Bool(bool),
-    Text(Box<str>),
-}
-
-pub type Result<T> = std::result::Result<T, StorageErr>;
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Storage {
     pub path: PathBuf,
+    file: File,
+    header: FileHeader,
+    tables: HashMap<TableId, TableMeta>,
+    table_names: HashMap<Box<str>, TableId>,
 }
 
 impl Storage {
-    pub fn open(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        match File::options().read(true).write(true).open(&path) {
+            Ok(mut file) => {
+                let header = FileHeader::read_from(&mut file)?;
+                let mut storage = Self {
+                    path,
+                    file,
+                    header,
+                    tables: HashMap::new(),
+                    table_names: HashMap::new(),
+                };
+                storage.replay()?;
+                Ok(storage)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut file = File::options()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?;
+                let header = FileHeader::new();
+                header.write_to(&mut file)?;
+                Ok(Self {
+                    path,
+                    file,
+                    header,
+                    tables: HashMap::new(),
+                    table_names: HashMap::new(),
+                })
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn create_table(&mut self, name: &str) -> Result<TableId> {
-        todo!("create_table")
+        if self.table_names.contains_key(name) {
+            return Err(StorageErr::InvalidSchema("table name already exists"));
+        }
+
+        let table_id = TableId(self.header.next_table_id);
+        self.header.next_table_id += 1;
+        let seq_no = self.header.next_seq_no;
+        self.header.next_seq_no += 1;
+
+        let record = Record::TableCreate { table_id, name: name.into() };
+        write_rec(&mut self.file, &record, seq_no)?;
+        self.header.flush_to(&mut self.file)?;
+        self.file.seek(SeekFrom::End(0))?;
+
+        let Record::TableCreate { table_id, name: boxed_name } = record else {
+            unreachable!()
+        };
+        self.table_names.insert(boxed_name.clone(), table_id);
+        self.tables.insert(
+            table_id,
+            TableMeta {
+                id: table_id,
+                name: boxed_name,
+                alive: true,
+                columns: Vec::new(),
+                rows: HashMap::new(),
+            },
+        );
+
+        Ok(table_id)
     }
 
     pub fn drop_table(&mut self, table: TableId) -> Result<()> {
-        todo!("drop_table")
+        match self.tables.get(&table) {
+            Some(meta) if meta.alive => {}
+            _ => return Err(StorageErr::TableNotFound(table)),
+        }
+
+        let seq_no = self.header.next_seq_no;
+        self.header.next_seq_no += 1;
+
+        let record = Record::TableDrop { table_id: table };
+        write_rec(&mut self.file, &record, seq_no)?;
+        self.header.flush_to(&mut self.file)?;
+        self.file.seek(SeekFrom::End(0))?;
+
+        let meta = self.tables.get_mut(&table).unwrap();
+        meta.alive = false;
+        let name = meta.name.clone();
+        self.table_names.remove(&*name);
+
+        Ok(())
     }
 
     pub fn create_column(
@@ -66,6 +136,10 @@ impl Storage {
 
     pub fn drop_column(&mut self, table: TableId, column: ColumnId) -> Result<()> {
         todo!("drop_column")
+    }
+
+    pub fn columns(&self, table: TableId) -> Result<Vec<ColumnId>> {
+        todo!("columns")
     }
 
     pub fn insert_row(
@@ -94,40 +168,173 @@ impl Storage {
     }
 }
 
-#[derive(Debug)]
-pub enum StorageErr {
-    Io(std::io::Error),
-    TableNotFound(TableId),
-    ColumnNotFound(ColumnId),
-    RowNotFound(RowId),
-    InvalidSchema(&'static str),
-    InvalidRow(&'static str),
-}
-
-impl std::fmt::Display for StorageErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "I/O error: {err}"),
-            Self::TableNotFound(id) => write!(f, "table not found: {}", id.0),
-            Self::ColumnNotFound(id) => write!(f, "column not found: {}", id.0),
-            Self::RowNotFound(id) => write!(f, "row not found: {}", id.0),
-            Self::InvalidSchema(msg) => write!(f, "invalid schema: {msg}"),
-            Self::InvalidRow(msg) => write!(f, "invalid row: {msg}"),
+impl Storage {
+    fn replay(&mut self) -> Result<()> {
+        loop {
+            match read_rec(&mut self.file)? {
+                Some(record) => self.apply(record)?,
+                None => break,
+            }
         }
+        Ok(())
+    }
+
+    fn apply(&mut self, record: Record) -> Result<()> {
+        match record {
+            Record::TableCreate { table_id, name } => {
+                if self.tables.contains_key(&table_id) {
+                    return Err(StorageErr::Corrupted(format!(
+                        "duplicate table_id: {}",
+                        table_id.0
+                    )));
+                }
+                if self.table_names.contains_key(&*name) {
+                    return Err(StorageErr::Corrupted(format!(
+                        "duplicate table name: {name}"
+                    )));
+                }
+                self.table_names.insert(name.clone(), table_id);
+                self.tables.insert(
+                    table_id,
+                    TableMeta {
+                        id: table_id,
+                        name,
+                        alive: true,
+                        columns: Vec::new(),
+                        rows: HashMap::new(),
+                    },
+                );
+            }
+            Record::TableDrop { table_id } => {
+                let name = {
+                    let meta = self.tables.get_mut(&table_id).ok_or_else(|| {
+                        StorageErr::Corrupted(format!(
+                            "drop unknown table: {}",
+                            table_id.0
+                        ))
+                    })?;
+                    meta.alive = false;
+                    meta.name.clone()
+                };
+                self.table_names.remove(&*name);
+            }
+        }
+        Ok(())
     }
 }
 
-impl std::error::Error for StorageErr {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_path(name: &str) -> PathBuf {
+        let dir = tempfile::tempdir().unwrap();
+        // leak the dir so it isn't cleaned up mid-test
+        let path = dir.path().join(format!("{name}.db"));
+        std::mem::forget(dir);
+        path
+    }
+
+    #[test]
+    fn new_file_has_empty_state() {
+        let path = test_path("new_empty");
+        let storage = Storage::open(&path).unwrap();
+        assert!(storage.tables.is_empty());
+        assert!(storage.table_names.is_empty());
+    }
+
+    #[test]
+    fn create_table_assigns_id() {
+        let path = test_path("create_id");
+        let mut storage = Storage::open(&path).unwrap();
+        let id1 = storage.create_table("users").unwrap();
+        let id2 = storage.create_table("posts").unwrap();
+        assert_eq!(id1, TableId(1));
+        assert_eq!(id2, TableId(2));
+    }
+
+    #[test]
+    fn duplicate_table_name_errors() {
+        let path = test_path("dup_name");
+        let mut storage = Storage::open(&path).unwrap();
+        storage.create_table("users").unwrap();
+        assert!(storage.create_table("users").is_err());
+    }
+
+    #[test]
+    fn drop_table_removes_name() {
+        let path = test_path("drop_name");
+        let mut storage = Storage::open(&path).unwrap();
+        let id = storage.create_table("users").unwrap();
+        storage.drop_table(id).unwrap();
+        assert!(!storage.table_names.contains_key("users"));
+        assert!(!storage.tables[&id].alive);
+    }
+
+    #[test]
+    fn drop_missing_table_errors() {
+        let path = test_path("drop_missing");
+        let mut storage = Storage::open(&path).unwrap();
+        assert!(storage.drop_table(TableId(99)).is_err());
+    }
+
+    #[test]
+    fn can_reuse_name_after_drop() {
+        let path = test_path("reuse_name");
+        let mut storage = Storage::open(&path).unwrap();
+        let id1 = storage.create_table("users").unwrap();
+        storage.drop_table(id1).unwrap();
+        let id2 = storage.create_table("users").unwrap();
+        assert_ne!(id1, id2);
+        assert!(storage.table_names.contains_key("users"));
+    }
+
+    #[test]
+    fn reopen_replays_creates() {
+        let path = test_path("replay_creates");
+        {
+            let mut s = Storage::open(&path).unwrap();
+            s.create_table("users").unwrap();
+            s.create_table("posts").unwrap();
+        }
+        {
+            let s = Storage::open(&path).unwrap();
+            assert!(s.table_names.contains_key("users"));
+            assert!(s.table_names.contains_key("posts"));
+            assert_eq!(s.tables.len(), 2);
         }
     }
-}
 
-impl From<std::io::Error> for StorageErr {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
+    #[test]
+    fn reopen_replays_drop() {
+        let path = test_path("replay_drop");
+        {
+            let mut s = Storage::open(&path).unwrap();
+            let id = s.create_table("users").unwrap();
+            s.create_table("posts").unwrap();
+            s.drop_table(id).unwrap();
+        }
+        {
+            let s = Storage::open(&path).unwrap();
+            assert!(!s.table_names.contains_key("users"));
+            assert!(s.table_names.contains_key("posts"));
+            assert!(!s.tables[&TableId(1)].alive);
+            assert!(s.tables[&TableId(2)].alive);
+        }
+    }
+
+    #[test]
+    fn header_counters_persist() {
+        let path = test_path("header_counters");
+        {
+            let mut s = Storage::open(&path).unwrap();
+            s.create_table("a").unwrap(); // table_id=1
+            s.create_table("b").unwrap(); // table_id=2
+        }
+        {
+            let mut s = Storage::open(&path).unwrap();
+            let id = s.create_table("c").unwrap();
+            assert_eq!(id, TableId(3));
+        }
     }
 }
