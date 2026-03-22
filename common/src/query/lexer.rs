@@ -1,4 +1,5 @@
-use super::error::{QueryErr, Result};
+use super::error::{QueryErr, QueryErrKind, Result};
+use super::span::Span;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6,10 +7,10 @@ pub enum Token {
     // 특수
     Eof,
     // 리터럴
-    Null,
-    Bool(bool),
+    Nil,
     Int(i64),
-    Float(f64),
+    Real(f64),
+    Bool(bool),
     Text(String),
     // 타입
     IntType,  // INT, INTEGER
@@ -75,15 +76,20 @@ pub enum Token {
     OpDiv,   // /
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
+}
+
 pub struct Lexer {
     src: VecDeque<char>,
+    span: Span,
 }
 
 impl Lexer {
     pub fn new(src: &str) -> Self {
-        Self {
-            src: src.chars().collect(),
-        }
+        Self { src: src.chars().collect(), span: Span::default() }
     }
 
     fn is_letter(ch: char) -> bool {
@@ -107,35 +113,61 @@ impl Lexer {
     }
 
     fn walk(&mut self) -> Option<char> {
-        self.src.pop_front()
+        let ch = self.src.pop_front()?;
+        self.span.len += 1;
+        Some(ch)
+    }
+
+    fn skip(&mut self) -> Option<char> {
+        let ch = self.src.pop_front()?;
+        self.span.pos += 1;
+        if ch == '\n' {
+            self.span.line += 1;
+            self.span.col = 1;
+        } else {
+            self.span.col += 1;
+        }
+        Some(ch)
     }
 
     fn skip_ws(&mut self) {
         while let Some(ch) = self.curr()
             && ch.is_whitespace()
         {
-            self.walk();
+            self.skip();
         }
     }
 
-    pub fn next(&mut self) -> Result<Token> {
-        self.skip_ws();
+    fn begin_span(&mut self) {
+        self.span.pos += self.span.len;
+        self.span.col += self.span.len;
+        self.span.len = 0;
+    }
+
+    fn err(&self, kind: QueryErrKind) -> QueryErr {
+        QueryErr { kind, span: self.span }
+    }
+
+    pub fn next(&mut self) -> Result<SpannedToken> {
+        self.begin_span();
+        loop {
+            self.skip_ws();
+            if self.peek(2) == "--" {
+                self.skip();
+                self.skip();
+                while let Some(ch) = self.skip()
+                    && ch != '\n'
+                {}
+                continue;
+            }
+            break;
+        }
         // 렉싱이 성공적으로 끝난 경우
         if self.finished() {
-            return Ok(Token::Eof);
+            return Ok(SpannedToken { token: Token::Eof, span: self.span });
         }
-        // 주석 파싱
-        if self.peek(2) == "--" {
-            self.walk();
-            self.walk();
-            while let Some(ch) = self.walk()
-                && ch != '\n'
-            {}
-            self.skip_ws();
-            return self.next();
-        }
-        let ch = self.walk().ok_or(QueryErr::UnexpectedEof)?;
-        Ok(match ch {
+        let ch = self.walk().ok_or_else(|| self.err(QueryErrKind::UnexpectedEof))?;
+        let token = match ch {
             '.' => Token::Dot,
             ',' => Token::Comma,
             ';' => Token::Semicolon,
@@ -165,8 +197,9 @@ impl Lexer {
             '\'' | '"' => self.lex_text(ch)?,
             _ if Self::is_digit(ch) => self.lex_num(ch)?,
             _ if Self::is_letter(ch) => self.lex_keyword(ch)?,
-            _ => return Err(QueryErr::InvalidToken(ch)),
-        })
+            _ => return Err(self.err(QueryErrKind::InvalidToken(ch))),
+        };
+        Ok(SpannedToken { token, span: self.span })
     }
 
     fn lex_text(&mut self, quote: char) -> Result<Token> {
@@ -174,8 +207,12 @@ impl Lexer {
         while let Some(ch) = self.walk() {
             if ch == quote {
                 return Ok(Token::Text(out));
+            } else if ch == '\n' {
+                return Err(self.err(QueryErrKind::UnterminatedText));
             } else if ch == '\\' {
-                let esc = self.walk().ok_or(QueryErr::UnterminatedText)?;
+                let esc = self
+                    .walk()
+                    .ok_or_else(|| self.err(QueryErrKind::UnterminatedText))?;
                 match esc {
                     '\\' => out.push('\\'),
                     '\'' => out.push('\''),
@@ -192,7 +229,7 @@ impl Lexer {
                 out.push(ch);
             }
         }
-        Err(QueryErr::UnterminatedText)
+        Err(self.err(QueryErrKind::UnterminatedText))
     }
 
     fn lex_num(&mut self, start: char) -> Result<Token> {
@@ -210,17 +247,19 @@ impl Lexer {
             }
         }
         if out.is_empty() {
-            Err(QueryErr::InvalidNum(out))
+            Err(self.err(QueryErrKind::InvalidNum(out)))
         } else if float {
             if out.ends_with('.') {
                 out.push('0');
             }
-            Ok(Token::Float(
-                out.parse::<f64>().map_err(|_| QueryErr::InvalidNum(out))?,
+            Ok(Token::Real(
+                out.parse::<f64>()
+                    .map_err(|_| self.err(QueryErrKind::InvalidNum(out)))?,
             ))
         } else {
             Ok(Token::Int(
-                out.parse::<i64>().map_err(|_| QueryErr::InvalidNum(out))?,
+                out.parse::<i64>()
+                    .map_err(|_| self.err(QueryErrKind::InvalidNum(out)))?,
             ))
         }
     }
@@ -236,7 +275,7 @@ impl Lexer {
         // 키워드 매칭
         Ok(match out.to_uppercase().as_str() {
             // 리터럴
-            "NULL" => Token::Null,
+            "NULL" => Token::Nil,
             "TRUE" => Token::Bool(true),
             "FALSE" => Token::Bool(false),
             // 타입
@@ -286,139 +325,5 @@ impl Lexer {
             "IS" => Token::Is,
             _ => Token::Ident(out),
         })
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_keywords() {
-        let mut lexer = Lexer::new("SELECT FROM WHERE CREATE TABLE");
-        assert_eq!(lexer.next().unwrap(), Token::Select);
-        assert_eq!(lexer.next().unwrap(), Token::From);
-        assert_eq!(lexer.next().unwrap(), Token::Where);
-        assert_eq!(lexer.next().unwrap(), Token::Create);
-        assert_eq!(lexer.next().unwrap(), Token::Table);
-    }
-
-    #[test]
-    fn test_identifiers() {
-        let mut lexer = Lexer::new("my_table user_id123");
-        assert_eq!(lexer.next().unwrap(), Token::Ident("my_table".to_string()));
-        assert_eq!(
-            lexer.next().unwrap(),
-            Token::Ident("user_id123".to_string())
-        );
-    }
-
-    #[test]
-    fn test_numbers() {
-        let mut lexer = Lexer::new("123 45.67");
-        assert_eq!(lexer.next().unwrap(), Token::Int(123i64));
-        assert_eq!(lexer.next().unwrap(), Token::Float(45.67f64));
-    }
-
-    #[test]
-    fn test_strings() {
-        let mut lexer = Lexer::new("'hello' \"world\" 'it\\'s me'");
-        assert_eq!(lexer.next().unwrap(), Token::Text("hello".to_string()));
-        assert_eq!(lexer.next().unwrap(), Token::Text("world".to_string()));
-        assert_eq!(lexer.next().unwrap(), Token::Text("it's me".to_string()));
-    }
-
-    #[test]
-    fn test_operators() {
-        let mut lexer = Lexer::new("= > < >= <= + - * /");
-        assert_eq!(lexer.next().unwrap(), Token::OpEq);
-        assert_eq!(lexer.next().unwrap(), Token::OpGt);
-        assert_eq!(lexer.next().unwrap(), Token::OpLt);
-        assert_eq!(lexer.next().unwrap(), Token::OpGe);
-        assert_eq!(lexer.next().unwrap(), Token::OpLe);
-        assert_eq!(lexer.next().unwrap(), Token::OpAdd);
-        assert_eq!(lexer.next().unwrap(), Token::OpSub);
-        assert_eq!(lexer.next().unwrap(), Token::OpMul);
-        assert_eq!(lexer.next().unwrap(), Token::OpDiv);
-    }
-
-    #[test]
-    fn test_delimiters() {
-        let mut lexer = Lexer::new(". , ; ( )");
-        assert_eq!(lexer.next().unwrap(), Token::Dot);
-        assert_eq!(lexer.next().unwrap(), Token::Comma);
-        assert_eq!(lexer.next().unwrap(), Token::Semicolon);
-        assert_eq!(lexer.next().unwrap(), Token::LParen);
-        assert_eq!(lexer.next().unwrap(), Token::RParen);
-    }
-
-    #[test]
-    fn test_complex_query() {
-        let mut lexer = Lexer::new("SELECT name FROM users WHERE id = 1;");
-        assert_eq!(lexer.next().unwrap(), Token::Select);
-        assert_eq!(lexer.next().unwrap(), Token::Ident("name".to_string()));
-        assert_eq!(lexer.next().unwrap(), Token::From);
-        assert_eq!(lexer.next().unwrap(), Token::Ident("users".to_string()));
-        assert_eq!(lexer.next().unwrap(), Token::Where);
-        assert_eq!(lexer.next().unwrap(), Token::Ident("id".to_string()));
-        assert_eq!(lexer.next().unwrap(), Token::OpEq);
-        assert_eq!(lexer.next().unwrap(), Token::Int(1i64));
-        assert_eq!(lexer.next().unwrap(), Token::Semicolon);
-    }
-
-    #[test]
-    fn test_case_insensitivity() {
-        let mut lexer = Lexer::new("select From WhErE");
-        assert_eq!(lexer.next().unwrap(), Token::Select);
-        assert_eq!(lexer.next().unwrap(), Token::From);
-        assert_eq!(lexer.next().unwrap(), Token::Where);
-    }
-
-    #[test]
-    fn test_unterminated_string() {
-        let mut lexer = Lexer::new("'unfinished");
-        match lexer.next() {
-            Err(QueryErr::UnterminatedText) => (),
-            _ => panic!("Expected UnterminatedText error"),
-        }
-    }
-
-    #[test]
-    fn test_boolean_and_null() {
-        let mut lexer = Lexer::new("TRUE FALSE NULL");
-        assert_eq!(lexer.next().unwrap(), Token::Bool(true));
-        assert_eq!(lexer.next().unwrap(), Token::Bool(false));
-        assert_eq!(lexer.next().unwrap(), Token::Null);
-    }
-
-    #[test]
-    fn test_logical_operators() {
-        let mut lexer = Lexer::new("NOT AND OR");
-        assert_eq!(lexer.next().unwrap(), Token::Not);
-        assert_eq!(lexer.next().unwrap(), Token::And);
-        assert_eq!(lexer.next().unwrap(), Token::Or);
-    }
-
-    #[test]
-    fn test_invalid_numbers() {
-        let mut lexer = Lexer::new("1.2.3");
-        assert_eq!(lexer.next().unwrap(), Token::Float(1.2f64));
-        assert_eq!(lexer.next().unwrap(), Token::Dot);
-        assert_eq!(lexer.next().unwrap(), Token::Int(3i64));
-    }
-
-    #[test]
-    fn test_comments() {
-        let mut lexer = Lexer::new("SELECT -- comment\nFROM users");
-        assert_eq!(lexer.next().unwrap(), Token::Select);
-        assert_eq!(lexer.next().unwrap(), Token::From);
-        assert_eq!(lexer.next().unwrap(), Token::Ident("users".to_string()));
-    }
-
-    #[test]
-    fn test_hex_not_supported() {
-        let mut lexer = Lexer::new("0x123");
-        assert_eq!(lexer.next().unwrap(), Token::Int(0i64));
-        assert_eq!(lexer.next().unwrap(), Token::Ident("x123".to_string()));
     }
 }

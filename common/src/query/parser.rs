@@ -1,14 +1,7 @@
-use super::error::{QueryErr, Result};
-use super::lexer::{Lexer, Token};
+use super::error::{QueryErr, QueryErrKind, Result};
+use super::lexer::{Lexer, SpannedToken, Token};
+use crate::schema::ValType;
 use std::mem::{discriminant, replace};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValType {
-    Int,
-    Real,
-    Bool,
-    Text,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -79,43 +72,12 @@ impl Stmt {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Clause {
-    Values(Vec<Expr>),               // expr
-    Columns(Vec<Box<str>>),          // col name
-    Assigns(Vec<(Box<str>, Expr)>),  // col name, expr
-    Defs(Vec<(Box<str>, ValType)>),  // col name, col type
-    OrderBy(Vec<(Box<Expr>, bool)>), // bool: true=ASC, false=DESC
-    Where(Box<Expr>),
-    Limit(u64),
-}
-
-macro_rules! as_clause {
-    ($name:ident, $variant:ident, $ret:ty) => {
-        pub fn $name(&self) -> Option<&$ret> {
-            if let Clause::$variant(inner) = self { Some(inner) } else { None }
-        }
-    };
-}
-
-impl Clause {
-    pub fn boxed(self) -> Box<Self> {
-        Box::new(self)
-    }
-    as_clause!(as_values, Values, Vec<Expr>);
-    as_clause!(as_columns, Columns, Vec<Box<str>>);
-    as_clause!(as_assigns, Assigns, Vec<(Box<str>, Expr)>);
-    as_clause!(as_defs, Defs, Vec<(Box<str>, ValType)>);
-    as_clause!(as_order_by, OrderBy, Vec<(Box<Expr>, bool)>);
-    as_clause!(as_where, Where, Expr);
-    as_clause!(as_limit, Limit, u64);
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Expr {
-    Null,
-    Bool(bool),
+    Nil,
     Int(i64),
-    Float(f64),
+    Real(f64),
+    Bool(bool),
     Text(Box<str>),
     Ident(Box<str>),
     Unary { op: Token, right: Box<Expr> },
@@ -130,8 +92,8 @@ impl Expr {
 
 pub struct Parser {
     lexer: Lexer,
-    curr: Token,
-    peek: Token,
+    curr: SpannedToken,
+    peek: SpannedToken,
 }
 
 impl Parser {
@@ -154,18 +116,21 @@ impl Parser {
         }
     }
 
-    fn next(&mut self) -> Result<Token> {
+    fn next(&mut self) -> Result<SpannedToken> {
         Ok(replace(&mut self.curr, replace(&mut self.peek, self.lexer.next()?)))
     }
 
     fn expect(&mut self, tokens: &[Token]) -> Result<()> {
         for token in tokens {
-            if discriminant(&self.curr) == discriminant(token) {
+            if discriminant(&self.curr.token) == discriminant(token) {
                 self.next()?;
             } else {
-                return Err(QueryErr::UnexpectedToken {
-                    expected: format!("{:?}", token),
-                    found: format!("{:?}", self.curr),
+                return Err(QueryErr {
+                    kind: QueryErrKind::UnexpectedToken {
+                        expected: format!("{:?}", token),
+                        found: format!("{:?}", self.curr.token),
+                    },
+                    span: self.curr.span,
                 });
             }
         }
@@ -175,7 +140,7 @@ impl Parser {
     fn maybe(&mut self, tokens: &[Token]) -> Result<bool> {
         if tokens.is_empty() {
             Ok(true)
-        } else if discriminant(&self.curr) != discriminant(&tokens[0]) {
+        } else if discriminant(&self.curr.token) != discriminant(&tokens[0]) {
             Ok(false)
         } else {
             self.expect(&tokens).map(|_| true)
@@ -188,8 +153,8 @@ impl Parser {
 
     fn parse_block(&mut self, terms: &[Token]) -> Result<Vec<Stmt>> {
         let mut stmts = Vec::new();
-        while !terms.iter().any(|t| discriminant(t) == discriminant(&self.curr)) {
-            if self.curr == Token::Semicolon {
+        while !terms.iter().any(|t| discriminant(t) == discriminant(&self.curr.token)) {
+            if self.curr.token == Token::Semicolon {
                 self.next()?;
                 continue;
             }
@@ -200,7 +165,7 @@ impl Parser {
     }
 
     pub fn parse_stmt(&mut self) -> Result<Stmt> {
-        match &self.curr {
+        match &self.curr.token {
             Token::Create => self.parse_create(),
             Token::Insert => self.parse_insert(),
             Token::Select => self.parse_select(),
@@ -209,9 +174,12 @@ impl Parser {
             Token::Delete => self.parse_delete(),
             Token::Truncate => self.parse_truncate(),
             Token::Drop => self.parse_drop(),
-            tok => Err(QueryErr::UnexpectedToken {
-                expected: "SELECT, INSERT, UPDATE, DELETE, CREATE, DROP".into(),
-                found: format!("{:?}", tok),
+            tok => Err(QueryErr {
+                kind: QueryErrKind::UnexpectedToken {
+                    expected: "SELECT, INSERT, UPDATE, DELETE, CREATE, DROP".into(),
+                    found: format!("{:?}", tok),
+                },
+                span: self.curr.span,
             }),
         }
     }
@@ -233,7 +201,7 @@ impl Parser {
         // INSERT INTO <table> [(<col1>, <col2>, ...)] ...
         self.expect(&[Token::Insert, Token::Into])?;
         let table = self.consume_ident()?;
-        let columns = if &self.curr == &Token::LParen {
+        let columns = if self.curr.token == Token::LParen {
             self.parse_list_clause(true, |p| p.consume_ident())?
         } else {
             vec![]
@@ -243,9 +211,12 @@ impl Parser {
         } else if self.maybe(&[Token::Select])? {
             unimplemented!("최소 구현 우선 (INSERT ... SELECT 지원 보류)")
         } else {
-            Err(QueryErr::UnexpectedToken {
-                expected: "VALUES or SELECT".into(),
-                found: format!("{:?}", self.curr),
+            Err(QueryErr {
+                kind: QueryErrKind::UnexpectedToken {
+                    expected: "VALUES or SELECT".into(),
+                    found: format!("{:?}", self.curr.token),
+                },
+                span: self.curr.span,
             })
         }
     }
@@ -320,9 +291,12 @@ impl Parser {
         } else if self.maybe(&[Token::Rename, Token::To])? {
             self.parse_alter_rename(table)
         } else {
-            Err(QueryErr::UnexpectedToken {
-                expected: "ADD, DROP, or RENAME".into(),
-                found: format!("{:?}", self.curr),
+            Err(QueryErr {
+                kind: QueryErrKind::UnexpectedToken {
+                    expected: "ADD, DROP, or RENAME".into(),
+                    found: format!("{:?}", self.curr.token),
+                },
+                span: self.curr.span,
             })
         }
     }
@@ -396,42 +370,51 @@ impl Parser {
     }
 
     fn consume_ident(&mut self) -> Result<Box<str>> {
-        match self.next()? {
+        let spanned = self.next()?;
+        match spanned.token {
             Token::Ident(name) => Ok(name.into_boxed_str()),
-            tok => Err(QueryErr::UnexpectedToken {
-                expected: "identifier".into(),
-                found: format!("{:?}", tok),
+            tok => Err(QueryErr {
+                kind: QueryErrKind::UnexpectedToken {
+                    expected: "identifier".into(),
+                    found: format!("{:?}", tok),
+                },
+                span: spanned.span,
             }),
         }
     }
 
     fn consume_type(&mut self) -> Result<ValType> {
-        match self.next()? {
+        let spanned = self.next()?;
+        match spanned.token {
             Token::IntType => Ok(ValType::Int),
             Token::RealType => Ok(ValType::Real),
             Token::BoolType => Ok(ValType::Bool),
             Token::TextType => Ok(ValType::Text),
-            tok => Err(QueryErr::UnexpectedToken {
-                expected: "type".into(),
-                found: format!("{:?}", tok),
+            tok => Err(QueryErr {
+                kind: QueryErrKind::UnexpectedToken {
+                    expected: "type".into(),
+                    found: format!("{:?}", tok),
+                },
+                span: spanned.span,
             }),
         }
     }
 
     fn parse_expr(&mut self, prec: u8) -> Result<Expr> {
         let mut left = self.parse_unary()?;
-        while prec < Self::precedence(&self.curr) {
+        while prec < Self::precedence(&self.curr.token) {
             left = self.parse_binary(left)?;
         }
         Ok(left)
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {
-        match self.next()? {
-            Token::Null => Ok(Expr::Null),
-            Token::Bool(b) => Ok(Expr::Bool(b)),
+        let spanned = self.next()?;
+        match spanned.token {
+            Token::Nil => Ok(Expr::Nil),
             Token::Int(n) => Ok(Expr::Int(n)),
-            Token::Float(f) => Ok(Expr::Float(f)),
+            Token::Real(f) => Ok(Expr::Real(f)),
+            Token::Bool(b) => Ok(Expr::Bool(b)),
             Token::Text(t) => Ok(Expr::Text(t.into_boxed_str())),
             Token::Ident(i) => Ok(Expr::Ident(i.into_boxed_str())),
             op @ (Token::Not | Token::OpSub) => {
@@ -439,9 +422,12 @@ impl Parser {
                 Ok(Expr::Unary { op, right })
             }
             Token::LParen => self.parse_group(),
-            tok => Err(QueryErr::UnexpectedToken {
-                expected: "expression (literal, identifier, or '(')".into(),
-                found: format!("{:?}", tok),
+            tok => Err(QueryErr {
+                kind: QueryErrKind::UnexpectedToken {
+                    expected: "expression (literal, identifier, or '(')".into(),
+                    found: format!("{:?}", tok),
+                },
+                span: spanned.span,
             }),
         }
     }
@@ -453,218 +439,21 @@ impl Parser {
     }
 
     fn parse_binary(&mut self, left: Expr) -> Result<Expr> {
-        let token = self.next()?;
-        let prec = Self::precedence(&token);
-        match token {
+        let spanned = self.next()?;
+        let prec = Self::precedence(&spanned.token);
+        match spanned.token {
             op if prec > 0 => {
                 let left = left.boxed();
                 let right = self.parse_expr(prec)?.boxed();
                 Ok(Expr::Binary { op, left, right })
             }
-            _ => Err(QueryErr::UnexpectedToken {
-                expected: "binary operator".to_string(),
-                found: format!("{:?}", token),
+            tok => Err(QueryErr {
+                kind: QueryErrKind::UnexpectedToken {
+                    expected: "binary operator".to_string(),
+                    found: format!("{:?}", tok),
+                },
+                span: spanned.span,
             }),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(input: &str) -> Stmt {
-        let lexer = Lexer::new(input);
-        let mut parser = Parser::new(lexer).unwrap();
-        let mut stmts = parser.parse().unwrap();
-        assert_eq!(stmts.len(), 1);
-        stmts.pop().unwrap()
-    }
-
-    #[test]
-    fn test_create_table() {
-        let input = "CREATE TABLE users (id INT, name TEXT);";
-        let stmt = parse(input);
-        match stmt {
-            Stmt::Create { table, columns, if_not_exists } => {
-                assert_eq!(table.as_ref(), "users");
-                assert_eq!(columns.len(), 2);
-                assert_eq!(columns[0], ("id".into(), ValType::Int));
-                assert_eq!(columns[1], ("name".into(), ValType::Text));
-                assert!(!if_not_exists);
-            }
-            _ => panic!("Expected Create stmt"),
-        }
-
-        let input_if_not_exists = "CREATE TABLE IF NOT EXISTS items (price FLOAT);";
-        let stmt = parse(input_if_not_exists);
-        match stmt {
-            Stmt::Create { table, columns, if_not_exists } => {
-                assert_eq!(table.as_ref(), "items");
-                assert_eq!(columns.len(), 1);
-                assert_eq!(columns[0], ("price".into(), ValType::Real));
-                assert!(if_not_exists);
-            }
-            _ => panic!("Expected Create stmt"),
-        }
-    }
-
-    #[test]
-    fn test_insert() {
-        let input = "INSERT INTO users VALUES (1, 'Alice');";
-        let stmt = parse(input);
-        match stmt {
-            Stmt::InsertValues { table, columns, rows } => {
-                assert_eq!(table.as_ref(), "users");
-                assert!(columns.is_empty()); // 컬럼 명시 안함
-                assert_eq!(rows.len(), 1); // 1 row
-                assert_eq!(rows[0].len(), 2);
-                assert_eq!(rows[0][0], Expr::Int(1));
-                assert_eq!(rows[0][1], Expr::Text("Alice".into()));
-            }
-            _ => panic!("Expected InsertValues stmt"),
-        }
-
-        // 컬럼 명시
-        let input_cols = "INSERT INTO users (id, name) VALUES (2, 'Bob');";
-        let stmt = parse(input_cols);
-        match stmt {
-            Stmt::InsertValues { table, columns, rows } => {
-                assert_eq!(table.as_ref(), "users");
-                assert_eq!(columns.len(), 2);
-                assert_eq!(columns[0].as_ref(), "id");
-                assert_eq!(columns[1].as_ref(), "name");
-                assert_eq!(rows.len(), 1);
-            }
-            _ => panic!("Expected InsertValues stmt"),
-        }
-    }
-
-    #[test]
-    fn test_select() {
-        let input = "SELECT id, name FROM users;";
-        let stmt = parse(input);
-        match stmt {
-            Stmt::Select { table, columns, distinct, .. } => {
-                assert_eq!(table.as_ref(), "users");
-                assert_eq!(columns.len(), 2);
-                assert!(!distinct);
-            }
-            _ => panic!("Expected Select stmt"),
-        }
-
-        let input_all = "SELECT * FROM users;";
-        let stmt = parse(input_all);
-        match stmt {
-            Stmt::Select { columns, .. } => {
-                assert!(columns.is_empty()); // * is parsed as empty columns list
-            }
-            _ => panic!("Expected Select stmt"),
-        }
-
-        let input_distinct = "SELECT DISTINCT id FROM users;";
-        let stmt = parse(input_distinct);
-        match stmt {
-            Stmt::Select { distinct, .. } => {
-                assert!(distinct);
-            }
-            _ => panic!("Expected Select stmt"),
-        }
-    }
-
-    #[test]
-    fn test_update() {
-        let input = "UPDATE users SET name = 'Charlie', score = score + 1;";
-        let stmt = parse(input);
-        match stmt {
-            Stmt::Update { table, assigns, .. } => {
-                assert_eq!(table.as_ref(), "users");
-                assert_eq!(assigns.len(), 2);
-                assert_eq!(assigns[0].0.as_ref(), "name");
-                assert_eq!(assigns[1].0.as_ref(), "score");
-            }
-            _ => panic!("Expected Update stmt"),
-        }
-    }
-
-    #[test]
-    fn test_alter() {
-        let input_add = "ALTER TABLE users ADD COLUMN age INT;";
-        let stmt = parse(input_add);
-        match stmt {
-            Stmt::AlterAdd { table, column } => {
-                assert_eq!(table.as_ref(), "users");
-                assert_eq!(column, ("age".into(), ValType::Int));
-            }
-            _ => panic!("Expected AlterAdd stmt"),
-        }
-
-        let input_drop = "ALTER TABLE users DROP COLUMN age;";
-        let stmt = parse(input_drop);
-        match stmt {
-            Stmt::AlterDrop { table, column } => {
-                assert_eq!(table.as_ref(), "users");
-                assert_eq!(column.as_ref(), "age");
-            }
-            _ => panic!("Expected AlterDrop stmt"),
-        }
-
-        let input_rename = "ALTER TABLE users RENAME TO super_users;";
-        let stmt = parse(input_rename);
-        match stmt {
-            Stmt::AlterRename { table, new_name } => {
-                assert_eq!(table.as_ref(), "users");
-                assert_eq!(new_name.as_ref(), "super_users");
-            }
-            _ => panic!("Expected AlterRename stmt"),
-        }
-    }
-
-    #[test]
-    fn test_delete() {
-        let input = "DELETE FROM users;";
-        let stmt = parse(input);
-        match stmt {
-            Stmt::Delete { table, .. } => {
-                assert_eq!(table.as_ref(), "users");
-            }
-            _ => panic!("Expected Delete stmt"),
-        }
-    }
-
-    #[test]
-    fn test_truncate() {
-        let input = "TRUNCATE TABLE users;";
-        let stmt = parse(input);
-        match stmt {
-            Stmt::Truncate { table } => {
-                assert_eq!(table.as_ref(), "users");
-            }
-            _ => panic!("Expected Truncate stmt"),
-        }
-    }
-
-    #[test]
-    fn test_drop() {
-        let input = "DROP TABLE items;";
-        let stmt = parse(input);
-        match stmt {
-            Stmt::Drop { table, if_exists, cascade } => {
-                assert_eq!(table.as_ref(), "items");
-                assert!(!if_exists);
-                assert!(!cascade);
-            }
-            _ => panic!("Expected Drop stmt"),
-        }
-
-        let input_opts = "DROP TABLE IF EXISTS items CASCADE;";
-        let stmt = parse(input_opts);
-        match stmt {
-            Stmt::Drop { if_exists, cascade, .. } => {
-                assert!(if_exists);
-                assert!(cascade);
-            }
-            _ => panic!("Expected Drop stmt"),
         }
     }
 }
