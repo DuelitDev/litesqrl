@@ -2,44 +2,53 @@ use super::error::{Result, StorageErr};
 use crate::schema::{DataType, DataValue};
 use std::io::Read;
 
-pub fn read_u8(r: &mut impl Read) -> Result<u8> {
+pub fn decode_u8(r: &mut impl Read) -> Result<u8> {
     let mut buf = [0u8; 1];
     r.read_exact(&mut buf)?;
     Ok(buf[0])
 }
 
-pub fn read_u16(r: &mut impl Read) -> Result<u16> {
+pub fn decode_u16(r: &mut impl Read) -> Result<u16> {
     let mut buf = [0u8; 2];
     r.read_exact(&mut buf)?;
     Ok(u16::from_le_bytes(buf))
 }
 
-pub fn read_u32(r: &mut impl Read) -> Result<u32> {
+pub fn decode_u32(r: &mut impl Read) -> Result<u32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
     Ok(u32::from_le_bytes(buf))
 }
 
-pub fn read_u64(r: &mut impl Read) -> Result<u64> {
+pub fn decode_u64(r: &mut impl Read) -> Result<u64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
 }
 
-pub fn read_i64(r: &mut impl Read) -> Result<i64> {
+pub fn decode_i64(r: &mut impl Read) -> Result<i64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf)?;
     Ok(i64::from_le_bytes(buf))
 }
 
-pub fn read_f64(r: &mut impl Read) -> Result<f64> {
+pub fn decode_f64(r: &mut impl Read) -> Result<f64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf)?;
     Ok(f64::from_le_bytes(buf))
 }
 
-pub fn read_str(r: &mut impl Read) -> Result<Box<str>> {
-    let len = read_u32(r)? as usize;
+pub fn decode_bool(r: &mut impl Read) -> Result<bool> {
+    let b = decode_u8(r)?;
+    match b {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(StorageErr::Corrupted(format!("invalid bool value: {b}"))),
+    }
+}
+
+pub fn decode_text(r: &mut impl Read) -> Result<Box<str>> {
+    let len = decode_u32(r)? as usize;
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     String::from_utf8(buf)
@@ -47,8 +56,8 @@ pub fn read_str(r: &mut impl Read) -> Result<Box<str>> {
         .map_err(|e| StorageErr::Corrupted(format!("invalid UTF-8: {e}")))
 }
 
-pub fn read_type(r: &mut impl Read) -> Result<DataType> {
-    let ty_id = read_u8(r)?;
+pub fn decode_type(r: &mut impl Read) -> Result<DataType> {
+    let ty_id = decode_u8(r)?;
     match ty_id {
         0 => Ok(DataType::Nil),
         1 => Ok(DataType::Int),
@@ -59,13 +68,13 @@ pub fn read_type(r: &mut impl Read) -> Result<DataType> {
     }
 }
 
-pub fn read_value(r: &mut impl Read, ty: DataType) -> Result<DataValue> {
+pub fn decode_value(r: &mut impl Read, ty: DataType) -> Result<DataValue> {
     match ty {
-        DataType::Nil => read_u8(r).map(|_| DataValue::Nil),
-        DataType::Int => read_i64(r).map(DataValue::Int),
-        DataType::Real => read_f64(r).map(DataValue::Real),
-        DataType::Bool => read_u8(r).map(|b| DataValue::Bool(b != 0)),
-        DataType::Text => read_str(r).map(DataValue::Text),
+        DataType::Nil => decode_u8(r).map(|_| DataValue::Nil),
+        DataType::Int => decode_i64(r).map(DataValue::Int),
+        DataType::Real => decode_f64(r).map(DataValue::Real),
+        DataType::Bool => decode_bool(r).map(DataValue::Bool),
+        DataType::Text => decode_text(r).map(DataValue::Text),
     }
 }
 
@@ -93,7 +102,11 @@ pub fn encode_f64(buf: &mut Vec<u8>, v: f64) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
 
-pub fn encode_str(buf: &mut Vec<u8>, s: &str) {
+pub fn encode_bool(buf: &mut Vec<u8>, v: bool) {
+    buf.push(if v { 1 } else { 0 });
+}
+
+pub fn encode_text(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
     buf.extend_from_slice(s.as_bytes());
 }
@@ -114,7 +127,7 @@ pub fn encode_value(buf: &mut Vec<u8>, val: &DataValue) {
         DataValue::Nil => encode_u8(buf, 0),
         DataValue::Int(i) => encode_i64(buf, *i),
         DataValue::Real(r) => encode_f64(buf, *r),
-        DataValue::Bool(b) => encode_u8(buf, if *b { 1 } else { 0 }),
-        DataValue::Text(s) => encode_str(buf, s),
+        DataValue::Bool(b) => encode_bool(buf, *b),
+        DataValue::Text(s) => encode_text(buf, s),
     }
 }
