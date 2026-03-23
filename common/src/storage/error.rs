@@ -1,4 +1,4 @@
-use super::{ColumnId, RowId, TableId};
+use super::{ColId, RowId, TableId};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, StorageErr>;
@@ -15,7 +15,7 @@ pub enum StorageErr {
     TableNotFound(TableId),
 
     #[error("column not found: {}", .0.0)]
-    ColumnNotFound(ColumnId),
+    ColumnNotFound(ColId),
 
     #[error("row not found: {}", .0.0)]
     RowNotFound(RowId),
