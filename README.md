@@ -25,7 +25,7 @@ File Header의 크기는 64 bytes로 고정한다.
 
 | Offset | Size | Type  | Name          | Description                  |
 |-------:|-----:|:------|:--------------|:-----------------------------|
-|      0 |    4 | bytes | magic         | "SQRL"                       |
+|      0 |    4 | bytes | magic         | Always 0x4c525153 ("SQRL")   |
 |      4 |    1 | u8    | version       | Always 2                     |
 |      5 |    1 | u8    | header_len    | Always 64                    |
 |      6 |    2 | u16   | flags         | 0 on init                    |
