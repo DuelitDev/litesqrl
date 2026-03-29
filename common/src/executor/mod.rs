@@ -3,6 +3,7 @@ use crate::schema::{DataType, DataValue};
 use crate::storage::{Storage, StorageErr};
 
 #[derive(serde::Serialize)]
+#[serde(tag = "type", content = "data")]
 pub enum QueryResult {
     Rows { columns: Vec<String>, rows: Vec<Vec<String>> },
     Count(usize),

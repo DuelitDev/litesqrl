@@ -30,7 +30,7 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir().expect("no app data dir");
             std::fs::create_dir_all(&data_dir)?;
-            let db_path = data_dir.join("db.sqrl");
+            let db_path = data_dir.join("database.sqrl");
             let storage = Storage::open(db_path).expect("failed to open storage");
             app.manage(Mutex::new(Executor::new(storage)));
             Ok(())
