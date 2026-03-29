@@ -467,16 +467,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common"
-version = "0.0.1"
-dependencies = [
- "crc32fast",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1976,6 +1966,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
+name = "litesqrl"
+version = "0.0.1"
+dependencies = [
+ "crc32fast",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2991,7 +2991,7 @@ dependencies = [
 name = "runtime"
 version = "0.0.1"
 dependencies = [
- "common",
+ "litesqrl",
  "serde",
  "serde_json",
  "tauri",

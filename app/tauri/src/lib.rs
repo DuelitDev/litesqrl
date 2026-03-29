@@ -1,16 +1,13 @@
-use common::executor::Executor;
-use common::storage::Storage;
-use common::query::{Lexer, Parser};
+use litesqrl::executor::{Executor, QueryResult};
+use litesqrl::query::{Lexer, Parser};
+use litesqrl::storage::Storage;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
 type DbState = Mutex<Executor>;
 
 #[tauri::command]
-fn run_query(
-    state: State<DbState>,
-    src: String,
-) -> Result<Vec<common::executor::QueryResult>, String> {
+fn run_query(state: State<DbState>, src: String) -> Result<Vec<QueryResult>, String> {
     let lexer = Lexer::new(src.as_str());
     let mut parser = Parser::new(lexer).map_err(|e| e.to_string())?;
     let stmts = parser.parse().map_err(|e| e.to_string())?;
