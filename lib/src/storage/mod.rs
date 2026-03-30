@@ -17,14 +17,38 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TableId(pub u64);
 
+impl From<u64> for TableId {
+    fn from(value: u64) -> Self {
+        TableId(value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ColId(pub u64);
+
+impl From<u64> for ColId {
+    fn from(value: u64) -> Self {
+        ColId(value)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RowId(pub u64);
 
+impl From<u64> for RowId {
+    fn from(value: u64) -> Self {
+        RowId(value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SeqNo(pub u32);
+
+impl From<u32> for SeqNo {
+    fn from(value: u32) -> Self {
+        SeqNo(value)
+    }
+}
 
 #[derive(Debug)]
 pub struct Storage {
@@ -41,7 +65,8 @@ impl Storage {
         match File::options().read(true).write(true).open(&path) {
             Ok(mut file) => {
                 let header = FileHeader::read_from(&mut file)?;
-                let mut storage = Self { path, file, header, db: DbState::default(), seq_no: 0 };
+                let mut storage =
+                    Self { path, file, header, db: DbState::default(), seq_no: 0 };
                 storage.replay()?;
                 Ok(storage)
             }
@@ -97,10 +122,8 @@ impl Storage {
     pub fn create_table(&mut self, name: &str) -> Result<TableId> {
         let table_id = self.db.alloc_table_id();
         let seq = self.next_seq();
-        let rec = Record::TableCreate(TableCreate {
-            table_id,
-            table_name: name.into(),
-        });
+        let rec =
+            Record::TableCreate(TableCreate { table_id, table_name: name.into() });
         rec.write_to(&mut self.file, seq);
         self.db.apply(rec)?;
         Ok(table_id)
@@ -133,12 +156,7 @@ impl Storage {
         let row_id = self.db.alloc_row_id();
         let count = values.len() as u64;
         let seq = self.next_seq();
-        let rec = Record::RowInsert(RowInsert {
-            table_id,
-            row_id,
-            count,
-            values,
-        });
+        let rec = Record::RowInsert(RowInsert { table_id, row_id, count, values });
         rec.write_to(&mut self.file, seq);
         self.db.apply(rec)?;
         Ok(row_id)
