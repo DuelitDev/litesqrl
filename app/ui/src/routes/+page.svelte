@@ -8,7 +8,7 @@
     | { type: 'Success' }
     | { type: 'Count'; data: number }
     | { type: 'Rows'; data: { columns: string[]; rows: string[][] } }
-    | { type: 'Error'; data: string };
+    | { type: 'Err'; data: string };
 
   let query = $state('');
   let results = $state<QueryResult[]>([]);
@@ -19,14 +19,9 @@
     if (!query.trim()) return;
     const startedAt = performance.now();
     running = true;
-    try {
-      results = await invoke<QueryResult[]>('run_query', { src: query });
-    } catch (e) {
-      results = [{ type: 'Error', data: String(e) }];
-    } finally {
-      elapsedMs = Math.round(performance.now() - startedAt);
-      running = false;
-    }
+    results = await invoke<QueryResult[]>('run_query', { src: query });
+    elapsedMs = Math.round(performance.now() - startedAt);
+    running = false;
   }
 </script>
 
@@ -73,7 +68,7 @@
                 </div>
               {:else if result.type === 'Rows'}
                 <QueryRowsResult cols={result.data.columns} rows={result.data.rows} />
-              {:else if result.type === 'Error'}
+              {:else if result.type === 'Err'}
                 <div class="alert alert-error alert-soft px-2 py-1">
                   {result.data}
                 </div>

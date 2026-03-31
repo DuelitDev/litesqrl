@@ -37,6 +37,8 @@ impl FileHeader {
             return Err(StorageErr::Corrupted("unexpected header length".into()));
         }
         let flags = d.u16()?;
+        let mut reserved = [0u8; 56];
+        d.into_inner().read_exact(&mut reserved)?;
         Ok(Self { flags })
     }
 }
