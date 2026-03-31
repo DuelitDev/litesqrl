@@ -1,6 +1,6 @@
 use super::codec::{Decoder, Encoder};
 use super::error::{Result, StorageErr};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 
 pub const MAGIC: u32 = 0x4c525153;
 pub const VERSION: u8 = 2;
