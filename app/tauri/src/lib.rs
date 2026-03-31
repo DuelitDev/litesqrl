@@ -7,17 +7,26 @@ use tauri::{Manager, State};
 type DbState = Mutex<Executor>;
 
 #[tauri::command]
-fn run_query(state: State<DbState>, src: String) -> Result<Vec<QueryResult>, String> {
+fn run_query(state: State<DbState>, src: String) -> Vec<QueryResult> {
     let lexer = Lexer::new(src.as_str());
-    let mut parser = Parser::new(lexer).map_err(|e| e.to_string())?;
-    let stmts = parser.parse().map_err(|e| e.to_string())?;
+    let mut parser = match Parser::new(lexer) {
+        Ok(parser) => parser,
+        Err(e) => return vec![QueryResult::Err(e.to_string())],
+    };
+    let stmts = match parser.parse() {
+        Ok(stmts) => stmts,
+        Err(e) => return vec![QueryResult::Err(e.to_string())],
+    };
     let mut exec = state.lock().unwrap();
     let mut results = Vec::with_capacity(stmts.len());
     for stmt in stmts {
-        let result = exec.run(stmt).map_err(|e| e.to_string())?;
+        let result = match exec.run(stmt.stmt) {
+            Ok(res) => res,
+            Err(e) => QueryResult::Err(e.to_string()),
+        };
         results.push(result);
     }
-    Ok(results)
+    results
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

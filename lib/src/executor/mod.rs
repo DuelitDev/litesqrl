@@ -8,6 +8,7 @@ pub enum QueryResult {
     Rows { columns: Vec<String>, rows: Vec<Vec<String>> },
     Count(usize),
     Success,
+    Err(String),
 }
 
 #[derive(Debug, thiserror::Error)]
