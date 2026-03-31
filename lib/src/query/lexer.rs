@@ -3,6 +3,12 @@ use super::span::Span;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // 특수
     Eof,
@@ -74,12 +80,6 @@ pub enum Token {
     OpSub,   // -
     OpMul,   // *
     OpDiv,   // /
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SpannedToken {
-    pub token: Token,
-    pub span: Span,
 }
 
 pub struct Lexer {

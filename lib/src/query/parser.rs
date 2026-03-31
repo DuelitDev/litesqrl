@@ -1,7 +1,14 @@
 use super::error::{QueryErr, QueryErrKind, Result};
 use super::lexer::{Lexer, SpannedToken, Token};
+use super::span::Span;
 use crate::schema::DataType;
 use std::mem::{discriminant, replace};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedStmt {
+    pub stmt: Stmt,
+    pub span: Span,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -147,19 +154,35 @@ impl Parser {
         }
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Stmt>> {
-        self.parse_block(&[Token::Eof])
+    fn sync(&mut self) {
+        let terms = [
+            Token::Semicolon,
+            Token::Create,
+            Token::Insert,
+            Token::Select,
+            Token::Update,
+            Token::Alter,
+            Token::Delete,
+            Token::Truncate,
+            Token::Drop,
+        ];
+        while !terms.iter().any(|t| discriminant(&self.curr.token) == discriminant(t))
+            && discriminant(&self.curr.token) != discriminant(&Token::Eof)
+        {
+            self.next().ok();
+        }
     }
 
-    fn parse_block(&mut self, terms: &[Token]) -> Result<Vec<Stmt>> {
+    pub fn parse(&mut self) -> Result<Vec<SpannedStmt>> {
         let mut stmts = Vec::new();
-        while !terms.iter().any(|t| discriminant(t) == discriminant(&self.curr.token)) {
+        while discriminant(&Token::Eof) != discriminant(&self.curr.token) {
             if self.curr.token == Token::Semicolon {
                 self.next()?;
                 continue;
             }
+            let span = self.curr.span;
             let stmt = self.parse_stmt()?;
-            stmts.push(stmt);
+            stmts.push(SpannedStmt { stmt, span });
         }
         Ok(stmts)
     }
