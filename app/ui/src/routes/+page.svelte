@@ -5,6 +5,7 @@
   import {
     explainQueryError,
     generateQueryFromPrompt,
+    listAiModels,
     loadAiSettings,
     saveAiSettings,
     type AiSettings
@@ -25,14 +26,21 @@
   let settingsDialog = $state<HTMLDialogElement | null>(null);
   let promptDialog = $state<HTMLDialogElement | null>(null);
   let promptInput = $state<HTMLTextAreaElement | null>(null);
-  let aiSettings = $state<AiSettings>({ apiKey: '', endpoint: '' });
+  let aiSettings = $state<AiSettings>({ apiKey: '', endpoint: '', model: '' });
   let settingsLoading = $state(true);
   let settingsSaving = $state(false);
+  let modelsLoading = $state(false);
   let settingsError = $state('');
   let settingsNotice = $state('');
+  let modelsError = $state('');
+  let availableModels = $state<string[]>([]);
   let promptText = $state('');
   let promptError = $state('');
+  let promptErrorDetails = $state('');
   let generatingQuery = $state(false);
+  let detailsDialog = $state<HTMLDialogElement | null>(null);
+  let detailsTitle = $state('');
+  let detailsContent = $state('');
   let explanationDialog = $state<HTMLDialogElement | null>(null);
   let explainingError = $state(false);
   let explanationError = $state('');
@@ -45,6 +53,7 @@
       if (saved) {
         aiSettings.apiKey = saved.apiKey;
         aiSettings.endpoint = saved.endpoint;
+        aiSettings.model = saved.model;
       }
     } catch (error) {
       settingsError = error instanceof Error ? error.message : 'Failed to load AI settings.';
@@ -65,18 +74,82 @@
   function openSettings() {
     settingsError = '';
     settingsNotice = '';
+    modelsError = '';
     settingsDialog?.showModal();
+  }
+
+  async function refreshModels() {
+    settingsError = '';
+    modelsError = '';
+
+    if (!aiSettings.apiKey.trim()) {
+      modelsError = 'API key is required to load models.';
+      return;
+    }
+
+    if (!aiSettings.endpoint.trim()) {
+      modelsError = 'Endpoint is required to load models.';
+      return;
+    }
+
+    modelsLoading = true;
+
+    try {
+      const models = await listAiModels({
+        apiKey: aiSettings.apiKey.trim(),
+        endpoint: aiSettings.endpoint.trim(),
+        model: aiSettings.model.trim()
+      });
+      availableModels = models;
+      const firstModel = models[0];
+      if (!aiSettings.model.trim() && firstModel) {
+        aiSettings.model = firstModel;
+      }
+    } catch (error) {
+      modelsError = error instanceof Error ? error.message : 'Failed to load models.';
+    } finally {
+      modelsLoading = false;
+    }
   }
 
   async function openPromptDialog() {
     promptError = '';
+    promptErrorDetails = '';
     promptDialog?.showModal();
     await tick();
     promptInput?.focus();
   }
 
+  function formatErrorDetails(error: unknown): string {
+    if (error instanceof Error) {
+      const parts = [error.name, error.message, error.stack].filter(Boolean);
+      return parts.join('\n\n');
+    }
+
+    if (typeof error === 'string') {
+      return error;
+    }
+
+    if (error && typeof error === 'object') {
+      try {
+        return JSON.stringify(error, null, 2);
+      } catch {
+        return String(error);
+      }
+    }
+
+    return String(error);
+  }
+
+  function openDetails(title: string, content: string) {
+    detailsTitle = title;
+    detailsContent = content;
+    detailsDialog?.showModal();
+  }
+
   async function generateQuery() {
     promptError = '';
+    promptErrorDetails = '';
 
     if (!promptText.trim()) {
       promptError = 'Prompt is required.';
@@ -93,7 +166,8 @@
       query = generatedQuery;
       promptDialog?.close();
     } catch (error) {
-      promptError = error instanceof Error ? error.message : 'Failed to generate a query.';
+      promptError = 'Failed to generate a query.';
+      promptErrorDetails = formatErrorDetails(error);
     } finally {
       generatingQuery = false;
     }
@@ -129,12 +203,18 @@
       return;
     }
 
+    if (!aiSettings.model.trim()) {
+      settingsError = 'Model is required.';
+      return;
+    }
+
     settingsSaving = true;
 
     try {
       await saveAiSettings({
         apiKey: aiSettings.apiKey.trim(),
-        endpoint: aiSettings.endpoint.trim()
+        endpoint: aiSettings.endpoint.trim(),
+        model: aiSettings.model.trim()
       });
       settingsNotice = 'Saved.';
       settingsDialog?.close();
@@ -275,6 +355,42 @@
           <p class="label">Stored locally for this app.</p>
         </fieldset>
 
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">Model</legend>
+          <div class="join w-full">
+            <select
+              class="select join-item w-full"
+              bind:value={aiSettings.model}
+              disabled={settingsLoading || settingsSaving || modelsLoading}
+            >
+              <option value="" disabled>Select a model</option>
+              {#each availableModels as model (model)}
+                <option value={model}>{model}</option>
+              {/each}
+              {#if aiSettings.model && !availableModels.includes(aiSettings.model)}
+                <option value={aiSettings.model}>{aiSettings.model}</option>
+              {/if}
+            </select>
+            <button
+              class="btn join-item"
+              type="button"
+              onclick={refreshModels}
+              disabled={settingsLoading || settingsSaving || modelsLoading}
+            >
+              {#if modelsLoading}
+                <span class="loading loading-spinner loading-xs"></span>
+              {:else}
+                Load
+              {/if}
+            </button>
+          </div>
+          <p class="label">Loads models from the configured OpenAI-compatible endpoint.</p>
+        </fieldset>
+
+        {#if modelsError}
+          <div role="alert" class="alert alert-error alert-soft text-sm">{modelsError}</div>
+        {/if}
+
         {#if settingsError}
           <div role="alert" class="alert alert-error alert-soft text-sm">{settingsError}</div>
         {/if}
@@ -319,7 +435,17 @@
         </fieldset>
 
         {#if promptError}
-          <div role="alert" class="alert alert-error alert-soft text-sm">{promptError}</div>
+          <div role="alert" class="alert alert-error alert-soft flex items-center justify-between gap-3 text-sm">
+            <span>{promptError}</span>
+            {#if promptErrorDetails}
+              <button
+                class="btn btn-link btn-xs px-0"
+                onclick={() => openDetails('Query Generation Error', promptErrorDetails)}
+              >
+                Details
+              </button>
+            {/if}
+          </div>
         {/if}
       </div>
 
@@ -376,6 +502,24 @@
     </div>
     <form method="dialog" class="modal-backdrop">
       <button disabled={explainingError}>close</button>
+    </form>
+  </dialog>
+
+  <dialog bind:this={detailsDialog} class="modal">
+    <div class="modal-box max-w-2xl">
+      <h3 class="text-base font-semibold">{detailsTitle}</h3>
+      <div class="bg-base-200 rounded-box mt-4 whitespace-pre-wrap px-3 py-3 font-mono text-sm leading-6">
+        {detailsContent}
+      </div>
+
+      <div class="modal-action">
+        <form method="dialog">
+          <button class="btn btn-ghost">Close</button>
+        </form>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button>close</button>
     </form>
   </dialog>
 </div>

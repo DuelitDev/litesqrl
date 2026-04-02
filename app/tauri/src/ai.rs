@@ -10,11 +10,13 @@ use tauri::{AppHandle, Manager, Runtime};
 pub struct AiSettings {
     pub api_key: String,
     pub endpoint: String,
+    #[serde(default)]
+    pub model: String,
 }
 
 impl Default for AiSettings {
     fn default() -> Self {
-        Self { api_key: String::new(), endpoint: String::new() }
+        Self { api_key: String::new(), endpoint: String::new(), model: String::new() }
     }
 }
 
@@ -28,6 +30,7 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatCompletionRequest {
+    #[serde(default)]
     pub model: String,
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,6 +145,16 @@ struct OpenAiCompatResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct OpenAiCompatChoice {
     index: usize,
     message: OpenAiMessage,
@@ -205,6 +218,59 @@ impl OpenAiCompatClient {
 
         response.json::<OpenAiCompatResponse>().await.map_err(|e| e.to_string())
     }
+
+    async fn list_models(&self) -> Result<Vec<String>, String> {
+        if self.settings.api_key.trim().is_empty() {
+            return Err("AI API key is not configured.".to_string());
+        }
+
+        let models_endpoint = models_endpoint(&self.settings.endpoint)?;
+
+        let response = self
+            .http
+            .get(&models_endpoint)
+            .bearer_auth(self.settings.api_key.trim())
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.map_err(|e| e.to_string())?;
+            let message = serde_json::from_str::<OpenAiCompatErrorEnvelope>(&body)
+                .map(|parsed| parsed.error.message)
+                .unwrap_or(body);
+            return Err(format!(
+                "AI models request failed with {}: {}",
+                status, message
+            ));
+        }
+
+        let mut models = response
+            .json::<OpenAiModelsResponse>()
+            .await
+            .map_err(|e| e.to_string())?
+            .data
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        models.sort();
+        models.dedup();
+        Ok(models)
+    }
+}
+
+fn models_endpoint(endpoint: &str) -> Result<String, String> {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("AI endpoint is not configured.".to_string());
+    }
+
+    if let Some(prefix) = trimmed.strip_suffix("/chat/completions") {
+        return Ok(format!("{prefix}/models"));
+    }
+
+    Ok(format!("{trimmed}/models"))
 }
 
 fn public_response_from_raw(response: OpenAiCompatResponse) -> ChatCompletionResponse {
@@ -377,9 +443,36 @@ pub fn save_ai_settings<R: Runtime>(
     let normalized = AiSettings {
         api_key: settings.api_key.trim().to_string(),
         endpoint: settings.endpoint.trim().to_string(),
+        model: settings.model.trim().to_string(),
     };
     let raw = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
     std::fs::write(path, raw).map_err(|e| e.to_string())
+}
+
+pub async fn list_models_with_saved_settings<R: Runtime>(
+    app: &AppHandle<R>,
+    settings_override: AiSettings,
+) -> Result<Vec<String>, String> {
+    let saved = load_ai_settings(app)?.unwrap_or_default();
+    let settings = AiSettings {
+        api_key: if settings_override.api_key.trim().is_empty() {
+            saved.api_key
+        } else {
+            settings_override.api_key.trim().to_string()
+        },
+        endpoint: if settings_override.endpoint.trim().is_empty() {
+            saved.endpoint
+        } else {
+            settings_override.endpoint.trim().to_string()
+        },
+        model: if settings_override.model.trim().is_empty() {
+            saved.model
+        } else {
+            settings_override.model.trim().to_string()
+        },
+    };
+
+    OpenAiCompatClient::new(settings).list_models().await
 }
 
 pub async fn complete_chat_with_saved_settings<R: Runtime>(
@@ -393,7 +486,14 @@ pub async fn complete_chat_with_saved_settings<R: Runtime>(
 
     let client = OpenAiCompatClient::new(settings);
     let tools = ai_tools();
-    let model = request.model.trim().to_string();
+    let model = if request.model.trim().is_empty() {
+        client.settings.model.trim().to_string()
+    } else {
+        request.model.trim().to_string()
+    };
+    if model.is_empty() {
+        return Err("AI model is not configured.".to_string());
+    }
     let temperature = request.temperature;
     let max_tokens = request.max_tokens;
     let mut messages =

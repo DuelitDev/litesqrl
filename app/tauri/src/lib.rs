@@ -48,6 +48,14 @@ fn save_ai_settings<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+async fn list_ai_models<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    settings: AiSettings,
+) -> Result<Vec<String>, String> {
+    ai::list_models_with_saved_settings(&app, settings).await
+}
+
+#[tauri::command]
 async fn complete_ai_chat<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, DbState>,
@@ -72,6 +80,7 @@ pub fn run() {
             run_query,
             load_ai_settings,
             save_ai_settings,
+            list_ai_models,
             complete_ai_chat
         ])
         .run(tauri::generate_context!())

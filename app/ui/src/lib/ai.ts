@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 export type AiSettings = {
   apiKey: string;
   endpoint: string;
+  model: string;
 };
 
 export type ChatMessage = {
@@ -11,7 +12,7 @@ export type ChatMessage = {
 };
 
 export type ChatCompletionRequest = {
-  model: string;
+  model?: string;
   messages: ChatMessage[];
   temperature?: number;
   maxTokens?: number;
@@ -37,14 +38,15 @@ export async function saveAiSettings(settings: AiSettings): Promise<void> {
   await invoke('save_ai_settings', { settings });
 }
 
+export async function listAiModels(settings: AiSettings): Promise<string[]> {
+  return invoke<string[]>('list_ai_models', { settings });
+}
+
 export async function completeAiChat(
   request: ChatCompletionRequest
 ): Promise<ChatCompletionResponse> {
   return invoke<ChatCompletionResponse>('complete_ai_chat', { request });
 }
-
-const QUERY_GENERATION_MODEL = 'gpt-4.1-mini';
-const ERROR_EXPLANATION_MODEL = 'gpt-4.1-mini';
 
 const LITESQRL_LIMITATIONS = [
   'LiteSQRL currently supports CREATE TABLE, ALTER TABLE ADD COLUMN, ALTER TABLE DROP COLUMN, ALTER TABLE RENAME TO, INSERT ... VALUES, SELECT ... FROM ... with optional WHERE, UPDATE ... SET ... WHERE, DELETE ... WHERE, TRUNCATE TABLE, and DROP TABLE.',
@@ -67,7 +69,6 @@ export async function generateQueryFromPrompt(
     : 'There is no current draft SQL.';
 
   const response = await completeAiChat({
-    model: QUERY_GENERATION_MODEL,
     temperature: 0.2,
     messages: [
       {
@@ -91,7 +92,6 @@ export async function explainQueryError(
   errorMessage: string
 ): Promise<string> {
   const response = await completeAiChat({
-    model: ERROR_EXPLANATION_MODEL,
     temperature: 0.2,
     messages: [
       {
