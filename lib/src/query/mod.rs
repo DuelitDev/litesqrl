@@ -5,5 +5,5 @@ pub mod span;
 
 pub use error::QueryErr;
 pub use lexer::{Lexer, SpannedToken};
-pub use parser::{Expr, Parser, Stmt};
+pub use parser::{Expr, Parser, SelectSource, Stmt};
 pub use span::Span;

@@ -58,6 +58,7 @@ pub enum Token {
     Restrict, // RESTRICT
     Cascade,  // CASCADE
     Union,    // UNION
+    All,      // ALL
     // 구분자
     Dot,       // .
     Comma,     // ,
@@ -326,6 +327,7 @@ impl Lexer {
             "RESTRICT" => Token::Restrict,
             "CASCADE" => Token::Cascade,
             "UNION" => Token::Union,
+            "ALL" => Token::All,
             // 연산자
             "NOT" => Token::Not,
             "AND" => Token::And,

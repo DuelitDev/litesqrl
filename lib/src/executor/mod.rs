@@ -1,5 +1,5 @@
 use crate::query::lexer::Token;
-use crate::query::{Expr, QueryErr, Stmt};
+use crate::query::{Expr, QueryErr, SelectSource, Stmt};
 use crate::schema::{DataType, DataValue};
 use crate::storage::{ColId, RowId, RowState, Storage, StorageErr, TableState};
 use std::cmp::Ordering;
@@ -183,12 +183,12 @@ impl Executor {
     fn eval_aggregate(
         &self,
         expr: &Expr,
-        table: &TableState,
-        rows: &[&RowState],
+        source_columns: &[String],
+        rows: &[Vec<DataValue>],
     ) -> Result<DataValue> {
         let Expr::Call { name, args } = expr else {
             if let Expr::Alias { expr: inner_expr, .. } = expr {
-                return self.eval_aggregate(inner_expr, table, rows);
+                return self.eval_aggregate(inner_expr, source_columns, rows);
             }
             return Err(SQRLErr::InvalidFunction(
                 "expected aggregate call".to_string(),
@@ -205,7 +205,7 @@ impl Executor {
                 let count = match &args[0] {
                     Expr::Wildcard => rows.len() as i64,
                     arg => self
-                        .collect_aggregate_values(arg, table, rows)?
+                        .collect_aggregate_values(arg, source_columns, rows)?
                         .into_iter()
                         .filter(|value| *value != DataValue::Nil)
                         .count() as i64,
@@ -218,7 +218,8 @@ impl Executor {
                         "MAX() expects exactly one argument".to_string(),
                     ));
                 }
-                let values = self.collect_aggregate_values(&args[0], table, rows)?;
+                let values =
+                    self.collect_aggregate_values(&args[0], source_columns, rows)?;
                 let mut max_value: Option<DataValue> = None;
                 for value in values {
                     if value == DataValue::Nil {
@@ -239,7 +240,8 @@ impl Executor {
                         "MIN() expects exactly one argument".to_string(),
                     ));
                 }
-                let values = self.collect_aggregate_values(&args[0], table, rows)?;
+                let values =
+                    self.collect_aggregate_values(&args[0], source_columns, rows)?;
                 let mut min_value: Option<DataValue> = None;
                 for value in values {
                     if value == DataValue::Nil {
@@ -260,7 +262,8 @@ impl Executor {
                         "SUM() expects exactly one argument".to_string(),
                     ));
                 }
-                let values = self.collect_aggregate_values(&args[0], table, rows)?;
+                let values =
+                    self.collect_aggregate_values(&args[0], source_columns, rows)?;
                 self.sum_values(&values)
             }
             "AVG" => {
@@ -269,7 +272,8 @@ impl Executor {
                         "AVG() expects exactly one argument".to_string(),
                     ));
                 }
-                let values = self.collect_aggregate_values(&args[0], table, rows)?;
+                let values =
+                    self.collect_aggregate_values(&args[0], source_columns, rows)?;
                 self.avg_values(&values)
             }
             _ => Err(SQRLErr::UnsupportedFeature(format!("function {name}"))),
@@ -279,28 +283,24 @@ impl Executor {
     fn collect_aggregate_values(
         &self,
         expr: &Expr,
-        table: &TableState,
-        rows: &[&RowState],
+        source_columns: &[String],
+        rows: &[Vec<DataValue>],
     ) -> Result<Vec<DataValue>> {
         match expr {
             Expr::Wildcard => {
-                let live_cols = table.live_cols().collect::<Vec<_>>();
-                if live_cols.len() != 1 {
+                if source_columns.len() != 1 {
                     return Err(SQRLErr::InvalidFunction(
                         "aggregate(*) requires exactly one live column".to_string(),
                     ));
                 }
-                let col_id = live_cols[0].id;
                 Ok(rows
                     .iter()
-                    .map(|row| {
-                        row.values.get(&col_id).cloned().unwrap_or(DataValue::Nil)
-                    })
+                    .map(|row| row.first().cloned().unwrap_or(DataValue::Nil))
                     .collect())
             }
             arg => rows
                 .iter()
-                .map(|row| self.eval_in_row(arg, Some(table), Some(row)))
+                .map(|row| self.eval_in_source_row(arg, source_columns, row))
                 .collect::<Result<Vec<_>>>(),
         }
     }
@@ -459,6 +459,84 @@ impl Executor {
                 }
                 let left = self.eval_in_row(left, table, row)?;
                 let right = self.eval_in_row(right, table, row)?;
+                self.eval_binary(op, left, right)
+            }
+        }
+    }
+
+    fn eval_in_source_row(
+        &self,
+        expr: &Expr,
+        source_columns: &[String],
+        row: &[DataValue],
+    ) -> Result<DataValue> {
+        match expr {
+            Expr::Nil => Ok(DataValue::Nil),
+            Expr::Int(i) => Ok(DataValue::Int(*i)),
+            Expr::Real(r) => Ok(DataValue::Real(*r)),
+            Expr::Bool(b) => Ok(DataValue::Bool(*b)),
+            Expr::Text(s) => Ok(DataValue::Text(s.clone())),
+            Expr::Wildcard => {
+                Err(SQRLErr::UnsupportedFeature("wildcard expression".to_string()))
+            }
+            Expr::List(_) => {
+                Err(SQRLErr::UnsupportedFeature("list expression".to_string()))
+            }
+            Expr::Alias { expr, .. } => {
+                self.eval_in_source_row(expr, source_columns, row)
+            }
+            Expr::Call { name, .. } => Err(SQRLErr::UnsupportedFeature(format!(
+                "function {name} outside aggregate SELECT"
+            ))),
+            Expr::Ident(name) => {
+                let Some(index) =
+                    source_columns.iter().position(|column| column == name.as_ref())
+                else {
+                    return Err(SQRLErr::CannotResolveIdentifier(name.to_string()));
+                };
+                row.get(index)
+                    .cloned()
+                    .ok_or_else(|| SQRLErr::CannotResolveIdentifier(name.to_string()))
+            }
+            Expr::Unary { op, right } => {
+                let value = self.eval_in_source_row(right, source_columns, row)?;
+                match op {
+                    Token::Not => match value {
+                        DataValue::Bool(value) => Ok(DataValue::Bool(!value)),
+                        other => Err(SQRLErr::InvalidUnaryOp(format!(
+                            "NOT {:?}",
+                            other.data_type()
+                        ))),
+                    },
+                    Token::OpSub => match value {
+                        DataValue::Int(value) => Ok(DataValue::Int(-value)),
+                        DataValue::Real(value) => Ok(DataValue::Real(-value)),
+                        other => Err(SQRLErr::InvalidUnaryOp(format!(
+                            "- {:?}",
+                            other.data_type()
+                        ))),
+                    },
+                    _ => Err(SQRLErr::InvalidUnaryOp(format!("{op:?}"))),
+                }
+            }
+            Expr::Binary { op, left, right } => {
+                if *op == Token::In {
+                    let left = self.eval_in_source_row(left, source_columns, row)?;
+                    let Expr::List(values) = right.as_ref() else {
+                        return Err(SQRLErr::InvalidBinaryOp(
+                            "IN requires a parenthesized value list".to_string(),
+                        ));
+                    };
+                    let is_match = values
+                        .iter()
+                        .map(|expr| self.eval_in_source_row(expr, source_columns, row))
+                        .collect::<Result<Vec<_>>>()?
+                        .into_iter()
+                        .any(|value| value == left);
+                    return Ok(DataValue::Bool(is_match));
+                }
+                let left = self.eval_in_source_row(left, source_columns, row)?;
+                let right = self.eval_in_source_row(right, source_columns, row)?;
                 self.eval_binary(op, left, right)
             }
         }
@@ -652,6 +730,21 @@ impl Executor {
             other => Err(SQRLErr::InvalidPredicate(other.data_type())),
         }
     }
+
+    fn matches_source_where(
+        &self,
+        source_columns: &[String],
+        row: &[DataValue],
+        where_clause: Option<&Expr>,
+    ) -> Result<bool> {
+        let Some(expr) = where_clause else {
+            return Ok(true);
+        };
+        match self.eval_in_source_row(expr, source_columns, row)? {
+            DataValue::Bool(value) => Ok(value),
+            other => Err(SQRLErr::InvalidPredicate(other.data_type())),
+        }
+    }
 }
 
 impl Executor {
@@ -675,25 +768,8 @@ impl Executor {
             Stmt::InsertSelect { table_name, columns, select } => {
                 self.run_insert_select(&table_name, columns, *select)
             }
-            Stmt::Select {
-                table_name,
-                columns,
-                distinct,
-                where_clause,
-                group_by,
-                having,
-                order_by,
-                limit,
-            } => self.run_select(
-                &table_name,
-                columns,
-                distinct,
-                where_clause,
-                group_by,
-                having,
-                order_by,
-                limit,
-            ),
+            stmt @ Stmt::Select { .. } => self.run_select(stmt),
+            stmt @ Stmt::UnionAll { .. } => self.run_select(stmt),
             Stmt::Update { table_name, assigns, where_clause } => {
                 self.run_update(&table_name, assigns, where_clause)
             }
@@ -794,32 +870,7 @@ impl Executor {
     ) -> Result<QueryResult> {
         let (table_id, live_cols, source_indexes, expected) =
             self.resolve_insert_targets(table_name, &columns)?;
-        let Stmt::Select {
-            table_name,
-            columns,
-            distinct,
-            where_clause,
-            group_by,
-            having,
-            order_by,
-            limit,
-        } = select
-        else {
-            return Err(SQRLErr::UnsupportedFeature(
-                "INSERT source must be SELECT".to_string(),
-            ));
-        };
-
-        let (_, source_rows) = self.collect_select_rows(
-            &table_name,
-            columns,
-            distinct,
-            where_clause,
-            group_by,
-            having,
-            order_by,
-            limit,
-        )?;
+        let (_, source_rows) = self.collect_query_rows(&select)?;
 
         let count = source_rows.len();
         for source_row in source_rows {
@@ -902,27 +953,8 @@ impl Executor {
             .collect::<Result<Vec<_>>>()
     }
 
-    fn run_select(
-        &mut self,
-        table_name: &str,
-        columns: Vec<Expr>,
-        distinct: bool,
-        where_clause: Option<Expr>,
-        group_by: Option<Vec<Expr>>,
-        having: Option<Expr>,
-        order_by: Option<Vec<(Expr, bool)>>,
-        limit: Option<u64>,
-    ) -> Result<QueryResult> {
-        let (result_columns, rows) = self.collect_select_rows(
-            table_name,
-            columns,
-            distinct,
-            where_clause,
-            group_by,
-            having,
-            order_by,
-            limit,
-        )?;
+    fn run_select(&mut self, stmt: Stmt) -> Result<QueryResult> {
+        let (result_columns, rows) = self.collect_query_rows(&stmt)?;
         let rows = rows
             .into_iter()
             .map(|row| row.iter().map(Self::format_value).collect::<Vec<_>>())
@@ -930,15 +962,97 @@ impl Executor {
         Ok(QueryResult::Rows { columns: result_columns, rows })
     }
 
+    fn collect_query_rows(
+        &self,
+        stmt: &Stmt,
+    ) -> Result<(Vec<String>, Vec<Vec<DataValue>>)> {
+        match stmt {
+            Stmt::Select {
+                from,
+                columns,
+                distinct,
+                where_clause,
+                group_by,
+                having,
+                order_by,
+                limit,
+            } => self.collect_select_rows(
+                from,
+                columns,
+                *distinct,
+                where_clause.as_ref(),
+                group_by.as_ref(),
+                having.as_ref(),
+                order_by.as_ref(),
+                *limit,
+            ),
+            Stmt::UnionAll { left, right } => {
+                let (left_columns, mut left_rows) = self.collect_query_rows(left)?;
+                let (right_columns, right_rows) = self.collect_query_rows(right)?;
+                if left_columns.len() != right_columns.len() {
+                    return Err(SQRLErr::ColumnCountMismatch {
+                        expected: left_columns.len(),
+                        got: right_columns.len(),
+                    });
+                }
+                left_rows.extend(right_rows);
+                Ok((left_columns, left_rows))
+            }
+            _ => Err(SQRLErr::UnsupportedFeature(
+                "query source must be SELECT or UNION ALL".to_string(),
+            )),
+        }
+    }
+
+    fn load_select_source(
+        &self,
+        from: &SelectSource,
+    ) -> Result<(Vec<String>, Vec<Vec<DataValue>>)> {
+        match from {
+            SelectSource::Table { name, alias: _ } => {
+                let table = self.storage.get_table(name)?;
+                let live_cols = table.live_cols().collect::<Vec<_>>();
+                let columns = live_cols
+                    .iter()
+                    .map(|col| col.name.to_string())
+                    .collect::<Vec<_>>();
+
+                let mut live_rows =
+                    table.rows.values().filter(|row| row.alive).collect::<Vec<_>>();
+                live_rows.sort_by_key(|row| row.id.0);
+
+                let rows = live_rows
+                    .into_iter()
+                    .map(|row| {
+                        live_cols
+                            .iter()
+                            .map(|col| {
+                                row.values
+                                    .get(&col.id)
+                                    .cloned()
+                                    .unwrap_or(DataValue::Nil)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+
+                Ok((columns, rows))
+            }
+            SelectSource::Subquery { query, alias: _ } => {
+                self.collect_query_rows(query)
+            }
+        }
+    }
+
     fn collect_select_rows(
         &self,
-        table_name: &str,
-        columns: Vec<Expr>,
+        from: &SelectSource,
+        columns: &[Expr],
         distinct: bool,
-        where_clause: Option<Expr>,
-        group_by: Option<Vec<Expr>>,
-        having: Option<Expr>,
-        order_by: Option<Vec<(Expr, bool)>>,
+        where_clause: Option<&Expr>,
+        group_by: Option<&Vec<Expr>>,
+        having: Option<&Expr>,
+        order_by: Option<&Vec<(Expr, bool)>>,
         limit: Option<u64>,
     ) -> Result<(Vec<String>, Vec<Vec<DataValue>>)> {
         if group_by.is_some() {
@@ -951,26 +1065,21 @@ impl Executor {
             return Err(SQRLErr::UnsupportedFeature("ORDER BY".to_string()));
         }
 
-        let table = self.storage.get_table(table_name)?;
-        let live_cols: Vec<_> = table.live_cols().collect();
+        let (source_columns, source_rows) = self.load_select_source(from)?;
         let projections = if columns.is_empty() {
-            live_cols
+            source_columns
                 .iter()
-                .map(|col| Expr::Ident(col.name.clone()))
+                .map(|name| Expr::Ident(name.clone().into_boxed_str()))
                 .collect::<Vec<_>>()
         } else {
-            columns
+            columns.to_vec()
         };
         let result_columns =
             projections.iter().map(Self::expr_label).collect::<Vec<_>>();
 
-        let mut live_rows =
-            table.rows.values().filter(|row| row.alive).collect::<Vec<_>>();
-        live_rows.sort_by_key(|row| row.id.0);
-
         let mut filtered_rows = Vec::new();
-        for row in live_rows {
-            if self.matches_where(table, row, where_clause.as_ref())? {
+        for row in source_rows {
+            if self.matches_source_where(&source_columns, &row, where_clause)? {
                 filtered_rows.push(row);
             }
         }
@@ -984,7 +1093,7 @@ impl Executor {
             }
             let values = projections
                 .iter()
-                .map(|expr| self.eval_aggregate(expr, table, &filtered_rows))
+                .map(|expr| self.eval_aggregate(expr, &source_columns, &filtered_rows))
                 .collect::<Result<Vec<_>>>()?;
             return Ok((result_columns, vec![values]));
         }
@@ -993,7 +1102,7 @@ impl Executor {
         for row in filtered_rows {
             let values = projections
                 .iter()
-                .map(|expr| self.eval_in_row(expr, Some(table), Some(row)))
+                .map(|expr| self.eval_in_source_row(expr, &source_columns, &row))
                 .collect::<Result<Vec<_>>>()?;
 
             if distinct && result_rows.contains(&values) {

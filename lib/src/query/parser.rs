@@ -30,10 +30,10 @@ pub enum Stmt {
         columns: Vec<Box<str>>, // target column names
         select: Box<Stmt>,      // source SELECT statement
     },
-    // SELECT [DISTINCT] <col1>, <col2>, ... FROM <table>
+    // SELECT [DISTINCT] <col1>, <col2>, ... FROM <source>
     //     [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT]
     Select {
-        table_name: Box<str>,                // table name
+        from: SelectSource,                  // table or subquery source
         columns: Vec<Expr>,                  // col name (or expr)
         distinct: bool,                      // distinct flag
         where_clause: Option<Expr>,          // condition expr
@@ -41,6 +41,10 @@ pub enum Stmt {
         having: Option<Expr>,                // condition expr
         order_by: Option<Vec<(Expr, bool)>>, // col name, ASC/DESC
         limit: Option<u64>,                  // limit count
+    },
+    UnionAll {
+        left: Box<Stmt>,
+        right: Box<Stmt>,
     },
     // UPDATE <table> SET <col1> = <val1>, <col2> = <val2>, ... [WHERE]
     Update {
@@ -81,6 +85,13 @@ impl Stmt {
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum SelectSource {
+    Table { name: Box<str>, alias: Option<Box<str>> },
+    Subquery { query: Box<Stmt>, alias: Option<Box<str>> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -249,34 +260,42 @@ impl Parser {
         table: Box<str>,
         columns: Vec<Box<str>>,
     ) -> Result<Stmt> {
-        let select = self.parse_select_tail()?.boxed();
+        let select = self.parse_select_query()?.boxed();
         Ok(Stmt::InsertSelect { table_name: table, columns, select })
     }
 
     fn parse_select(&mut self) -> Result<Stmt> {
-        // SELECT [DISTINCT] <col1>, <col2>, ... FROM <table>
+        // SELECT [DISTINCT] <col1>, <col2>, ... FROM <source>
         //     [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT]
         self.expect(&[Token::Select])?;
-        self.parse_select_tail()
+        self.parse_select_query()
     }
 
-    fn parse_select_tail(&mut self) -> Result<Stmt> {
+    fn parse_select_query(&mut self) -> Result<Stmt> {
+        let mut stmt = self.parse_select_core()?;
+        while self.maybe(&[Token::Union])? {
+            self.expect(&[Token::All, Token::Select])?;
+            let right = self.parse_select_core()?;
+            stmt = Stmt::UnionAll { left: stmt.boxed(), right: right.boxed() };
+        }
+        Ok(stmt)
+    }
+
+    fn parse_select_core(&mut self) -> Result<Stmt> {
         let distinct = self.maybe(&[Token::Distinct])?;
-        // 전체 컬럼 선택 '*' 처리
         let columns = if !self.maybe(&[Token::OpMul])? {
             self.parse_list_clause(false, |p| p.parse_select_expr())?
         } else {
             vec![]
         };
-        self.expect(&[Token::From])?;
-        let table = self.consume_ident()?;
+        let from = self.parse_select_from()?;
         let where_clause = self.parse_where_clause()?;
         let group_by = None;
         let having = None;
         let order_by = None;
         let limit = None;
         Ok(Stmt::Select {
-            table_name: table,
+            from,
             distinct,
             columns,
             where_clause,
@@ -285,6 +304,31 @@ impl Parser {
             order_by,
             limit,
         })
+    }
+
+    fn parse_select_from(&mut self) -> Result<SelectSource> {
+        self.expect(&[Token::From])?;
+        if self.maybe(&[Token::LParen])? {
+            self.expect(&[Token::Select])?;
+            let query = self.parse_select_query()?.boxed();
+            self.expect(&[Token::RParen])?;
+            let alias = self.parse_source_alias()?;
+            Ok(SelectSource::Subquery { query, alias })
+        } else {
+            let name = self.consume_ident()?;
+            let alias = self.parse_source_alias()?;
+            Ok(SelectSource::Table { name, alias })
+        }
+    }
+
+    fn parse_source_alias(&mut self) -> Result<Option<Box<str>>> {
+        if self.maybe(&[Token::As])? {
+            Ok(Some(self.consume_ident()?))
+        } else if matches!(self.curr.token, Token::Ident(_)) {
+            Ok(Some(self.consume_ident()?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn parse_select_expr(&mut self) -> Result<Expr> {
