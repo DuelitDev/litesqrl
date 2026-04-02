@@ -1,10 +1,6 @@
 <script lang="ts">
-  interface Props {
-    cols: string[];
-    rows: string[][];
-  }
-
-  let { cols, rows }: Props = $props();
+  export let cols: string[];
+  export let rows: string[][];
 </script>
 
 <div class="overflow-x-auto">
