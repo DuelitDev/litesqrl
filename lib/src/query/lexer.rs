@@ -64,22 +64,23 @@ pub enum Token {
     LParen,    // (
     RParen,    // )
     // 연산자
-    Not,     // NOT
-    And,     // AND
-    Or,      // OR
-    In,      // IN
-    Like,    // LIKE
-    Between, // BETWEEN
-    Is,      // I
-    OpEq,    // =
-    OpGt,    // >
-    OpLt,    // <
-    OpGe,    // >=
-    OpLe,    // <=
-    OpAdd,   // +
-    OpSub,   // -
-    OpMul,   // *
-    OpDiv,   // /
+    Not,      // NOT
+    And,      // AND
+    Or,       // OR
+    In,       // IN
+    Like,     // LIKE
+    Between,  // BETWEEN
+    Is,       // I
+    OpEq,     // =
+    OpGt,     // >
+    OpLt,     // <
+    OpGe,     // >=
+    OpLe,     // <=
+    OpConcat, // ||
+    OpAdd,    // +
+    OpSub,    // -
+    OpMul,    // *
+    OpDiv,    // /
 }
 
 pub struct Lexer {
@@ -188,6 +189,14 @@ impl Lexer {
                     Token::OpLe
                 } else {
                     Token::OpLt
+                }
+            }
+            '|' => {
+                if self.curr() == Some('|') {
+                    self.walk();
+                    Token::OpConcat
+                } else {
+                    return Err(self.err(QueryErrKind::InvalidToken(ch)));
                 }
             }
             '+' => Token::OpAdd,

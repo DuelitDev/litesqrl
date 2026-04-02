@@ -25,6 +25,11 @@ pub enum Stmt {
         columns: Vec<Box<str>>, // col name
         values: Vec<Expr>,      // val expr
     },
+    InsertSelect {
+        table_name: Box<str>,   // target table name
+        columns: Vec<Box<str>>, // target column names
+        select: Box<Stmt>,      // source SELECT statement
+    },
     // SELECT [DISTINCT] <col1>, <col2>, ... FROM <table>
     //     [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT]
     Select {
@@ -117,7 +122,7 @@ impl Parser {
             Token::And => 2,
             Token::OpEq | Token::In => 3,
             Token::OpGt | Token::OpLt | Token::OpGe | Token::OpLe => 4,
-            Token::OpAdd | Token::OpSub => 5,
+            Token::OpAdd | Token::OpSub | Token::OpConcat => 5,
             Token::OpMul | Token::OpDiv => 6,
             Token::LParen => 7,
             _ => 0,
@@ -214,7 +219,7 @@ impl Parser {
         if self.maybe(&[Token::Values])? {
             self.parse_insert_values(table, columns)
         } else if self.maybe(&[Token::Select])? {
-            unimplemented!("최소 구현 우선 (INSERT ... SELECT 지원 보류)")
+            self.parse_insert_select(table, columns)
         } else {
             Err(QueryErr {
                 kind: QueryErrKind::UnexpectedToken {
@@ -236,10 +241,23 @@ impl Parser {
         Ok(Stmt::InsertValues { table_name: table, columns, values })
     }
 
+    fn parse_insert_select(
+        &mut self,
+        table: Box<str>,
+        columns: Vec<Box<str>>,
+    ) -> Result<Stmt> {
+        let select = self.parse_select_tail()?.boxed();
+        Ok(Stmt::InsertSelect { table_name: table, columns, select })
+    }
+
     fn parse_select(&mut self) -> Result<Stmt> {
         // SELECT [DISTINCT] <col1>, <col2>, ... FROM <table>
         //     [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT]
         self.expect(&[Token::Select])?;
+        self.parse_select_tail()
+    }
+
+    fn parse_select_tail(&mut self) -> Result<Stmt> {
         let distinct = self.maybe(&[Token::Distinct])?;
         // 전체 컬럼 선택 '*' 처리
         let columns = if !self.maybe(&[Token::OpMul])? {

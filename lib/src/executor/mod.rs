@@ -260,6 +260,10 @@ impl Executor {
                     right.data_type()
                 ))),
             },
+            Token::OpConcat => Ok(DataValue::Text(
+                format!("{}{}", Self::format_value(&left), Self::format_value(&right))
+                    .into_boxed_str(),
+            )),
             Token::OpSub => match (left, right) {
                 (DataValue::Int(left), DataValue::Int(right)) => {
                     Ok(DataValue::Int(left - right))
@@ -414,6 +418,9 @@ impl Executor {
             Stmt::InsertValues { table_name, columns, values } => {
                 self.run_insert_values(&table_name, columns, values)
             }
+            Stmt::InsertSelect { table_name, columns, select } => {
+                self.run_insert_select(&table_name, columns, *select)
+            }
             Stmt::Select {
                 table_name,
                 columns,
@@ -504,20 +511,94 @@ impl Executor {
         columns: Vec<Box<str>>,
         values: Vec<Expr>,
     ) -> Result<QueryResult> {
-        let (table_id, live_cols) = {
-            let table = self.storage.get_table(table_name)?;
-            let live_cols = table
-                .live_cols()
-                .map(|col| (col.name.clone(), col.data_type))
-                .collect::<Vec<_>>();
-            (table.id, live_cols)
-        };
+        let (table_id, live_cols, source_indexes, expected) =
+            self.resolve_insert_targets(table_name, &columns)?;
 
-        let expected = if columns.is_empty() { live_cols.len() } else { columns.len() };
-        if values.len() != expected {
-            return Err(SQRLErr::ColumnCountMismatch { expected, got: values.len() });
+        let evaluated = values
+            .into_iter()
+            .map(|expr| self.eval(&expr))
+            .collect::<Result<Vec<_>>>()?;
+
+        if evaluated.len() != expected {
+            return Err(SQRLErr::ColumnCountMismatch {
+                expected,
+                got: evaluated.len(),
+            });
         }
 
+        let row = self.build_insert_row(&live_cols, &source_indexes, &evaluated)?;
+
+        self.storage.insert_row(table_id, row)?;
+        Ok(QueryResult::Count(1))
+    }
+
+    fn run_insert_select(
+        &mut self,
+        table_name: &str,
+        columns: Vec<Box<str>>,
+        select: Stmt,
+    ) -> Result<QueryResult> {
+        let (table_id, live_cols, source_indexes, expected) =
+            self.resolve_insert_targets(table_name, &columns)?;
+        let Stmt::Select {
+            table_name,
+            columns,
+            distinct,
+            where_clause,
+            group_by,
+            having,
+            order_by,
+            limit,
+        } = select
+        else {
+            return Err(SQRLErr::UnsupportedFeature(
+                "INSERT source must be SELECT".to_string(),
+            ));
+        };
+
+        let (_, source_rows) = self.collect_select_rows(
+            &table_name,
+            columns,
+            distinct,
+            where_clause,
+            group_by,
+            having,
+            order_by,
+            limit,
+        )?;
+
+        let count = source_rows.len();
+        for source_row in source_rows {
+            if source_row.len() != expected {
+                return Err(SQRLErr::ColumnCountMismatch {
+                    expected,
+                    got: source_row.len(),
+                });
+            }
+            let row =
+                self.build_insert_row(&live_cols, &source_indexes, &source_row)?;
+            self.storage.insert_row(table_id, row)?;
+        }
+
+        Ok(QueryResult::Count(count))
+    }
+
+    fn resolve_insert_targets(
+        &self,
+        table_name: &str,
+        columns: &[Box<str>],
+    ) -> Result<(
+        crate::storage::TableId,
+        Vec<(Box<str>, DataType)>,
+        Vec<Option<usize>>,
+        usize,
+    )> {
+        let table = self.storage.get_table(table_name)?;
+        let live_cols = table
+            .live_cols()
+            .map(|col| (col.name.clone(), col.data_type))
+            .collect::<Vec<_>>();
+        let expected = if columns.is_empty() { live_cols.len() } else { columns.len() };
         let source_indexes = if columns.is_empty() {
             (0..live_cols.len()).map(Some).collect::<Vec<_>>()
         } else {
@@ -536,19 +617,22 @@ impl Executor {
             }
             source_indexes
         };
+        Ok((table.id, live_cols, source_indexes, expected))
+    }
 
-        let evaluated = values
-            .into_iter()
-            .map(|expr| self.eval(&expr))
-            .collect::<Result<Vec<_>>>()?;
-
-        let row = source_indexes
-            .into_iter()
+    fn build_insert_row(
+        &self,
+        live_cols: &[(Box<str>, DataType)],
+        source_indexes: &[Option<usize>],
+        source_values: &[DataValue],
+    ) -> Result<Vec<DataValue>> {
+        source_indexes
+            .iter()
             .enumerate()
             .map(|(col_index, source_index)| {
                 let (col_name, col_type) = &live_cols[col_index];
                 let value = match source_index {
-                    Some(value_index) => evaluated[value_index].clone(),
+                    Some(value_index) => source_values[*value_index].clone(),
                     None => col_type.default(),
                 };
                 let value_type = value.data_type();
@@ -561,10 +645,7 @@ impl Executor {
                 }
                 Ok(value)
             })
-            .collect::<Result<Vec<_>>>()?;
-
-        self.storage.insert_row(table_id, row)?;
-        Ok(QueryResult::Count(1))
+            .collect::<Result<Vec<_>>>()
     }
 
     fn run_select(
@@ -578,6 +659,34 @@ impl Executor {
         order_by: Option<Vec<(Expr, bool)>>,
         limit: Option<u64>,
     ) -> Result<QueryResult> {
+        let (result_columns, rows) = self.collect_select_rows(
+            table_name,
+            columns,
+            distinct,
+            where_clause,
+            group_by,
+            having,
+            order_by,
+            limit,
+        )?;
+        let rows = rows
+            .into_iter()
+            .map(|row| row.iter().map(Self::format_value).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        Ok(QueryResult::Rows { columns: result_columns, rows })
+    }
+
+    fn collect_select_rows(
+        &self,
+        table_name: &str,
+        columns: Vec<Expr>,
+        distinct: bool,
+        where_clause: Option<Expr>,
+        group_by: Option<Vec<Expr>>,
+        having: Option<Expr>,
+        order_by: Option<Vec<(Expr, bool)>>,
+        limit: Option<u64>,
+    ) -> Result<(Vec<String>, Vec<Vec<DataValue>>)> {
         if group_by.is_some() {
             return Err(SQRLErr::UnsupportedFeature("GROUP BY".to_string()));
         }
@@ -606,7 +715,6 @@ impl Executor {
         live_rows.sort_by_key(|row| row.id.0);
 
         let mut result_rows = Vec::new();
-        let mut seen = HashSet::new();
         for row in live_rows {
             if !self.matches_where(table, row, where_clause.as_ref())? {
                 continue;
@@ -616,13 +724,12 @@ impl Executor {
                 .iter()
                 .map(|expr| self.eval_in_row(expr, Some(table), Some(row)))
                 .collect::<Result<Vec<_>>>()?;
-            let rendered = values.iter().map(Self::format_value).collect::<Vec<_>>();
 
-            if distinct && !seen.insert(rendered.clone()) {
+            if distinct && result_rows.contains(&values) {
                 continue;
             }
 
-            result_rows.push(rendered);
+            result_rows.push(values);
             if let Some(limit) = limit {
                 if result_rows.len() as u64 >= limit {
                     break;
@@ -630,7 +737,7 @@ impl Executor {
             }
         }
 
-        Ok(QueryResult::Rows { columns: result_columns, rows: result_rows })
+        Ok((result_columns, result_rows))
     }
 
     fn run_update(
