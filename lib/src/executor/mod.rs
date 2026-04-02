@@ -143,7 +143,7 @@ impl Executor {
     }
 
     fn is_aggregate(expr: &Expr) -> bool {
-        matches!(expr, Expr::Call { name, .. } if matches!(name.to_ascii_uppercase().as_str(), "MAX" | "COUNT"))
+        matches!(expr, Expr::Call { name, .. } if matches!(name.to_ascii_uppercase().as_str(), "MAX" | "MIN" | "SUM" | "AVG" | "COUNT"))
     }
 
     fn compare_values(left: &DataValue, right: &DataValue) -> Result<Ordering> {
@@ -191,10 +191,8 @@ impl Executor {
                 }
                 let count = match &args[0] {
                     Expr::Wildcard => rows.len() as i64,
-                    arg => rows
-                        .iter()
-                        .map(|row| self.eval_in_row(arg, Some(table), Some(row)))
-                        .collect::<Result<Vec<_>>>()?
+                    arg => self
+                        .collect_aggregate_values(arg, table, rows)?
                         .into_iter()
                         .filter(|value| *value != DataValue::Nil)
                         .count() as i64,
@@ -207,14 +205,9 @@ impl Executor {
                         "MAX() expects exactly one argument".to_string(),
                     ));
                 }
-                if matches!(args[0], Expr::Wildcard) {
-                    return Err(SQRLErr::InvalidFunction(
-                        "MAX(*) is not supported".to_string(),
-                    ));
-                }
+                let values = self.collect_aggregate_values(&args[0], table, rows)?;
                 let mut max_value: Option<DataValue> = None;
-                for row in rows {
-                    let value = self.eval_in_row(&args[0], Some(table), Some(row))?;
+                for value in values {
                     if value == DataValue::Nil {
                         continue;
                     }
@@ -227,7 +220,149 @@ impl Executor {
                 }
                 Ok(max_value.unwrap_or(DataValue::Nil))
             }
+            "MIN" => {
+                if args.len() != 1 {
+                    return Err(SQRLErr::InvalidFunction(
+                        "MIN() expects exactly one argument".to_string(),
+                    ));
+                }
+                let values = self.collect_aggregate_values(&args[0], table, rows)?;
+                let mut min_value: Option<DataValue> = None;
+                for value in values {
+                    if value == DataValue::Nil {
+                        continue;
+                    }
+                    match &min_value {
+                        Some(current)
+                            if Self::compare_values(&value, current)?
+                                != Ordering::Less => {}
+                        _ => min_value = Some(value),
+                    }
+                }
+                Ok(min_value.unwrap_or(DataValue::Nil))
+            }
+            "SUM" => {
+                if args.len() != 1 {
+                    return Err(SQRLErr::InvalidFunction(
+                        "SUM() expects exactly one argument".to_string(),
+                    ));
+                }
+                let values = self.collect_aggregate_values(&args[0], table, rows)?;
+                self.sum_values(&values)
+            }
+            "AVG" => {
+                if args.len() != 1 {
+                    return Err(SQRLErr::InvalidFunction(
+                        "AVG() expects exactly one argument".to_string(),
+                    ));
+                }
+                let values = self.collect_aggregate_values(&args[0], table, rows)?;
+                self.avg_values(&values)
+            }
             _ => Err(SQRLErr::UnsupportedFeature(format!("function {name}"))),
+        }
+    }
+
+    fn collect_aggregate_values(
+        &self,
+        expr: &Expr,
+        table: &TableState,
+        rows: &[&RowState],
+    ) -> Result<Vec<DataValue>> {
+        match expr {
+            Expr::Wildcard => {
+                let live_cols = table.live_cols().collect::<Vec<_>>();
+                if live_cols.len() != 1 {
+                    return Err(SQRLErr::InvalidFunction(
+                        "aggregate(*) requires exactly one live column".to_string(),
+                    ));
+                }
+                let col_id = live_cols[0].id;
+                Ok(rows
+                    .iter()
+                    .map(|row| {
+                        row.values.get(&col_id).cloned().unwrap_or(DataValue::Nil)
+                    })
+                    .collect())
+            }
+            arg => rows
+                .iter()
+                .map(|row| self.eval_in_row(arg, Some(table), Some(row)))
+                .collect::<Result<Vec<_>>>(),
+        }
+    }
+
+    fn sum_values(&self, values: &[DataValue]) -> Result<DataValue> {
+        let mut has_real = false;
+        let mut int_sum: i64 = 0;
+        let mut real_sum: f64 = 0.0;
+        let mut seen = false;
+
+        for value in values {
+            match value {
+                DataValue::Nil => {}
+                DataValue::Int(value) => {
+                    seen = true;
+                    if has_real {
+                        real_sum += *value as f64;
+                    } else {
+                        int_sum += *value;
+                    }
+                }
+                DataValue::Real(value) => {
+                    seen = true;
+                    if !has_real {
+                        has_real = true;
+                        real_sum = int_sum as f64;
+                    }
+                    real_sum += *value;
+                }
+                other => {
+                    return Err(SQRLErr::InvalidFunction(format!(
+                        "SUM() requires numeric values, got {:?}",
+                        other.data_type()
+                    )));
+                }
+            }
+        }
+
+        if !seen {
+            Ok(DataValue::Nil)
+        } else if has_real {
+            Ok(DataValue::Real(real_sum))
+        } else {
+            Ok(DataValue::Int(int_sum))
+        }
+    }
+
+    fn avg_values(&self, values: &[DataValue]) -> Result<DataValue> {
+        let mut total = 0.0;
+        let mut count = 0usize;
+
+        for value in values {
+            match value {
+                DataValue::Nil => {}
+                DataValue::Int(value) => {
+                    total += *value as f64;
+                    count += 1;
+                }
+                DataValue::Real(value) => {
+                    total += *value;
+                    count += 1;
+                }
+                other => {
+                    return Err(SQRLErr::InvalidFunction(format!(
+                        "AVG() requires numeric values, got {:?}",
+                        other.data_type()
+                    )));
+                }
+            }
+        }
+
+        if count == 0 {
+            Ok(DataValue::Nil)
+        } else {
+            Ok(DataValue::Real(total / count as f64))
         }
     }
 
