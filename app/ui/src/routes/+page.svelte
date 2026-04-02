@@ -401,15 +401,15 @@
         </fieldset>
 
         <fieldset class="fieldset">
-          <legend class="fieldset-legend">LANG</legend>
+          <legend class="fieldset-legend">Language</legend>
           <input
             class="input w-full"
-            placeholder="ko, en, ja, zh-CN"
+            placeholder="ko, en, ja, de, etc."
             bind:value={aiSettings.lang}
             autocomplete="off"
             disabled={settingsLoading || settingsSaving}
           />
-          <p class="label">The AI uses this language for explanations and other natural-language responses.</p>
+          <p class="label">The AI uses this language for explanations.</p>
         </fieldset>
 
         {#if modelsError}
