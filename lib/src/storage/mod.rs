@@ -122,6 +122,23 @@ impl Storage {
         Ok(table_id)
     }
 
+    pub fn truncate_table(&mut self, table_id: TableId) -> Result<()> {
+        let table = self
+            .state
+            .get_table(&table_id)
+            .ok_or(StorageErr::TableNotFound(table_id))?;
+        if !table.alive {
+            return Err(StorageErr::TableNotFound(table_id));
+        }
+        // build record
+        let seq = self.state.next_seq_no();
+        let rec = TableTruncate { table_id };
+        // write then commit
+        write_rec(&mut self.file, &rec, seq)?;
+        self.state.commit_table_truncate(rec);
+        Ok(())
+    }
+
     pub fn drop_table(&mut self, table_id: TableId) -> Result<()> {
         let table = self
             .state
@@ -176,6 +193,71 @@ impl Storage {
         Ok(col_id)
     }
 
+    pub fn alter_column(
+        &mut self,
+        table_id: TableId,
+        col_id: ColId,
+        new_col_type: DataType,
+        new_name: &str,
+    ) -> Result<()> {
+        let table = self
+            .state
+            .get_table(&table_id)
+            .ok_or(StorageErr::TableNotFound(table_id))?;
+        let col = table.get_col(&col_id).ok_or(StorageErr::ColumnNotFound(col_id))?;
+        if !col.alive {
+            return Err(StorageErr::ColumnNotFound(col_id));
+        }
+        for existing in table.live_cols() {
+            if existing.id != col_id && &*existing.name == new_name {
+                return Err(StorageErr::ColumnAlreadyExists {
+                    id: existing.id,
+                    name: new_name.into(),
+                });
+            }
+        }
+
+        let seq = self.state.next_seq_no();
+        let rec = ColumnAlter {
+            table_id,
+            col_id,
+            new_col_type,
+            new_col_name: new_name.into(),
+        };
+
+        write_rec(&mut self.file, &rec, seq)?;
+        self.state.commit_column_alter(rec);
+        Ok(())
+    }
+
+    pub fn drop_column(&mut self, table_id: TableId, col_id: ColId) -> Result<()> {
+        let table = self
+            .state
+            .get_table(&table_id)
+            .ok_or(StorageErr::TableNotFound(table_id))?;
+        let col = table.get_col(&col_id).ok_or(StorageErr::ColumnNotFound(col_id))?;
+        if !col.alive {
+            return Err(StorageErr::ColumnNotFound(col_id));
+        }
+
+        let seq = self.state.next_seq_no();
+        let rec = ColumnDrop { table_id, col_id };
+
+        write_rec(&mut self.file, &rec, seq)?;
+        self.state.commit_column_drop(rec);
+        Ok(())
+    }
+
+    pub fn get_column(&self, table_id: TableId, name: &str) -> Result<&ColState> {
+        let table = self
+            .state
+            .get_table(&table_id)
+            .ok_or(StorageErr::TableNotFound(table_id))?;
+        table
+            .get_col_by_name(name)
+            .ok_or_else(|| StorageErr::CannotResolveColumn(name.into()))
+    }
+
     pub fn insert_row(
         &mut self,
         table_id: TableId,
@@ -201,5 +283,74 @@ impl Storage {
         write_rec(&mut self.file, &rec, seq)?;
         self.state.commit_row_insert(rec);
         Ok(row_id)
+    }
+
+    pub fn update_row(
+        &mut self,
+        table_id: TableId,
+        row_id: RowId,
+        patches: Vec<(ColId, DataValue)>,
+    ) -> Result<()> {
+        let table = self
+            .state
+            .get_table(&table_id)
+            .ok_or(StorageErr::TableNotFound(table_id))?;
+        let row = table.rows.get(&row_id).ok_or(StorageErr::RowNotFound(row_id))?;
+        if !row.alive {
+            return Err(StorageErr::RowNotFound(row_id));
+        }
+
+        let mut seen_cols = std::collections::HashSet::new();
+        for (col_id, value) in &patches {
+            if !seen_cols.insert(*col_id) {
+                return Err(StorageErr::InvalidRow("duplicate patch column"));
+            }
+            let col =
+                table.get_col(col_id).ok_or(StorageErr::ColumnNotFound(*col_id))?;
+            if !col.alive {
+                return Err(StorageErr::ColumnNotFound(*col_id));
+            }
+            if value.data_type() != col.data_type {
+                return Err(StorageErr::InvalidRow("column type mismatch"));
+            }
+        }
+
+        let count = patches.len() as u64;
+        let seq = self.state.next_seq_no();
+        let rec = RowUpdate { table_id, row_id, count, patches };
+
+        write_rec(&mut self.file, &rec, seq)?;
+        self.state.commit_row_update(rec);
+        Ok(())
+    }
+
+    pub fn delete_row(&mut self, table_id: TableId, row_id: RowId) -> Result<()> {
+        let table = self
+            .state
+            .get_table(&table_id)
+            .ok_or(StorageErr::TableNotFound(table_id))?;
+        let row = table.rows.get(&row_id).ok_or(StorageErr::RowNotFound(row_id))?;
+        if !row.alive {
+            return Err(StorageErr::RowNotFound(row_id));
+        }
+
+        let seq = self.state.next_seq_no();
+        let rec = RowDelete { table_id, row_id };
+
+        write_rec(&mut self.file, &rec, seq)?;
+        self.state.commit_row_delete(rec);
+        Ok(())
+    }
+
+    pub fn get_row(&self, table_id: TableId, row_id: RowId) -> Result<&RowState> {
+        let table = self
+            .state
+            .get_table(&table_id)
+            .ok_or(StorageErr::TableNotFound(table_id))?;
+        let row = table.rows.get(&row_id).ok_or(StorageErr::RowNotFound(row_id))?;
+        if !row.alive {
+            return Err(StorageErr::RowNotFound(row_id));
+        }
+        Ok(row)
     }
 }
