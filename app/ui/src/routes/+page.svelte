@@ -4,7 +4,6 @@
   import { onMount } from 'svelte';
   import {
     generateQueryFromPrompt,
-    listAiModels,
     loadAiSettings,
     saveAiSettings,
     type AiSettings
@@ -29,11 +28,7 @@
   let aiSettings = $state<AiSettings>({ apiKey: '', endpoint: '', model: '', lang: '' });
   let settingsLoading = $state(true);
   let settingsSaving = $state(false);
-  let modelsLoading = $state(false);
   let settingsError = $state('');
-  let settingsNotice = $state('');
-  let modelsError = $state('');
-  let availableModels = $state<string[]>([]);
   let promptOpen = $state(false);
   let promptText = $state('');
   let promptError = $state('');
@@ -74,44 +69,7 @@
 
   function openSettings() {
     settingsError = '';
-    settingsNotice = '';
-    modelsError = '';
     settingsDialog?.showModal();
-  }
-
-  async function refreshModels() {
-    settingsError = '';
-    modelsError = '';
-
-    if (!aiSettings.apiKey.trim()) {
-      modelsError = 'API key is required to load models.';
-      return;
-    }
-
-    if (!aiSettings.endpoint.trim()) {
-      modelsError = 'Endpoint is required to load models.';
-      return;
-    }
-
-    modelsLoading = true;
-
-    try {
-      const models = await listAiModels({
-        apiKey: aiSettings.apiKey.trim(),
-        endpoint: aiSettings.endpoint.trim(),
-        model: aiSettings.model.trim(),
-        lang: aiSettings.lang.trim()
-      });
-      availableModels = models;
-      const firstModel = models[0];
-      if (!aiSettings.model.trim() && firstModel) {
-        aiSettings.model = firstModel;
-      }
-    } catch (error) {
-      modelsError = error instanceof Error ? error.message : 'Failed to load models.';
-    } finally {
-      modelsLoading = false;
-    }
   }
 
   function openPromptDialog() {
@@ -180,7 +138,6 @@
 
   async function saveSettings() {
     settingsError = '';
-    settingsNotice = '';
 
     if (!aiSettings.apiKey.trim()) {
       settingsError = 'API key is required.';
@@ -211,7 +168,6 @@
         model: aiSettings.model.trim(),
         lang: aiSettings.lang.trim()
       });
-      settingsNotice = 'Saved.';
       settingsDialog?.close();
     } catch (error) {
       settingsError = error instanceof Error ? error.message : 'Failed to save AI settings.';
@@ -303,9 +259,6 @@
       <span class="text-base-content/70">to prompt AI</span>
     </div>
     <div class="flex items-center gap-2">
-      {#if settingsNotice}
-        <span class="text-success text-xs">{settingsNotice}</span>
-      {/if}
       <div class="text-base-content/70 min-w-16 text-right font-mono">
         {#if running}
           Running...
@@ -361,34 +314,14 @@
 
         <fieldset class="fieldset">
           <legend class="fieldset-legend">Model</legend>
-          <div class="join w-full">
-            <select
-              class="select join-item w-full"
-              bind:value={aiSettings.model}
-              disabled={settingsLoading || settingsSaving || modelsLoading}
-            >
-              <option value="" disabled>Select a model</option>
-              {#each availableModels as model (model)}
-                <option value={model}>{model}</option>
-              {/each}
-              {#if aiSettings.model && !availableModels.includes(aiSettings.model)}
-                <option value={aiSettings.model}>{aiSettings.model}</option>
-              {/if}
-            </select>
-            <button
-              class="btn join-item"
-              type="button"
-              onclick={refreshModels}
-              disabled={settingsLoading || settingsSaving || modelsLoading}
-            >
-              {#if modelsLoading}
-                <span class="loading loading-spinner loading-xs"></span>
-              {:else}
-                Load
-              {/if}
-            </button>
-          </div>
-          <p class="label">Loads models from the configured OpenAI-compatible endpoint.</p>
+          <input
+            class="input w-full font-mono text-xs"
+            type="text"
+            placeholder="gpt-4o, claude-sonnet-4-20250514, etc."
+            bind:value={aiSettings.model}
+            autocomplete="off"
+            disabled={settingsLoading || settingsSaving}
+          />
         </fieldset>
 
         <fieldset class="fieldset">
@@ -402,10 +335,6 @@
           />
           <p class="label">The AI uses this language for explanations.</p>
         </fieldset>
-
-        {#if modelsError}
-          <div role="alert" class="alert alert-error alert-soft text-sm">{modelsError}</div>
-        {/if}
 
         {#if settingsError}
           <div role="alert" class="alert alert-error alert-soft text-sm">{settingsError}</div>

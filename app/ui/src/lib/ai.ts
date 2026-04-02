@@ -39,10 +39,6 @@ export async function saveAiSettings(settings: AiSettings): Promise<void> {
   await invoke('save_ai_settings', { settings });
 }
 
-export async function listAiModels(settings: AiSettings): Promise<string[]> {
-  return invoke<string[]>('list_ai_models', { settings });
-}
-
 export async function completeAiChat(
   request: ChatCompletionRequest
 ): Promise<ChatCompletionResponse> {
