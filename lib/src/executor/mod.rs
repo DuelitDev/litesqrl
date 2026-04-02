@@ -65,9 +65,52 @@ impl Executor {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
+
+    pub fn schema_ddl(&self) -> String {
+        let mut tables = self
+            .storage
+            .state
+            .tables
+            .values()
+            .filter(|table| table.alive)
+            .collect::<Vec<_>>();
+        tables.sort_by(|left, right| left.name.cmp(&right.name));
+
+        if tables.is_empty() {
+            return "-- No tables defined.".to_string();
+        }
+
+        tables.into_iter().map(Self::format_table_ddl).collect::<Vec<_>>().join("\n\n")
+    }
 }
 
 impl Executor {
+    fn format_table_ddl(table: &TableState) -> String {
+        let columns = table
+            .live_cols()
+            .map(|column| {
+                format!(
+                    "  {} {}",
+                    column.name,
+                    Self::format_data_type(column.data_type)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+
+        format!("CREATE TABLE {} (\n{}\n);", table.name, columns)
+    }
+
+    fn format_data_type(data_type: DataType) -> &'static str {
+        match data_type {
+            DataType::Nil => "NIL",
+            DataType::Int => "INT",
+            DataType::Real => "REAL",
+            DataType::Bool => "BOOL",
+            DataType::Text => "TEXT",
+        }
+    }
+
     fn format_value(value: &DataValue) -> String {
         match value {
             DataValue::Nil => "nil".to_string(),

@@ -1,3 +1,6 @@
+mod ai;
+
+use ai::{AiSettings, ChatCompletionRequest, ChatCompletionResponse};
 use litesqrl::executor::{Executor, QueryResult};
 use litesqrl::query::{Lexer, Parser};
 use litesqrl::storage::Storage;
@@ -29,6 +32,30 @@ fn run_query(state: State<DbState>, src: String) -> Vec<QueryResult> {
     results
 }
 
+#[tauri::command]
+fn load_ai_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<AiSettings>, String> {
+    ai::load_ai_settings(&app)
+}
+
+#[tauri::command]
+fn save_ai_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    settings: AiSettings,
+) -> Result<(), String> {
+    ai::save_ai_settings(&app, settings)
+}
+
+#[tauri::command]
+async fn complete_ai_chat<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, DbState>,
+    request: ChatCompletionRequest,
+) -> Result<ChatCompletionResponse, String> {
+    ai::complete_chat_with_saved_settings(&app, state.inner(), request).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -41,7 +68,12 @@ pub fn run() {
             app.manage(Mutex::new(Executor::new(storage)));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![run_query])
+        .invoke_handler(tauri::generate_handler![
+            run_query,
+            load_ai_settings,
+            save_ai_settings,
+            complete_ai_chat
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
