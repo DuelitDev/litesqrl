@@ -1,0 +1,1 @@
+<div class="alert alert-success alert-soft px-2 py-1">OK</div>

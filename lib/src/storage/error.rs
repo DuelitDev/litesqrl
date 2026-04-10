@@ -1,0 +1,43 @@
+use super::{ColId, RowId, TableId};
+use thiserror::Error;
+
+pub type Result<T> = std::result::Result<T, StorageErr>;
+
+#[derive(Debug, Error)]
+pub enum StorageErr {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("corrupted: {0}")]
+    Corrupted(String),
+
+    #[error("table already exists: '{name}' ({})", .id.0)]
+    TableAlreadyExists { id: TableId, name: Box<str> },
+
+    #[error("column already exists: '{name}' ({})", .id.0)]
+    ColumnAlreadyExists { id: ColId, name: Box<str> },
+
+    #[error("cannot resolve table: {0}")]
+    CannotResolveTable(Box<str>),
+
+    #[error("cannot resolve column: {0}")]
+    CannotResolveColumn(Box<str>),
+
+    #[error("table not found: {}", .0.0)]
+    TableNotFound(TableId),
+
+    #[error("column not found: {}", .0.0)]
+    ColumnNotFound(ColId),
+
+    #[error("row not found: {}", .0.0)]
+    RowNotFound(RowId),
+
+    #[error("invalid schema: {0}")]
+    InvalidSchema(&'static str),
+
+    #[error("invalid row: {0}")]
+    InvalidRow(&'static str),
+
+    #[error("invalid record tag: {0}")]
+    InvalidRecordTag(u8),
+}

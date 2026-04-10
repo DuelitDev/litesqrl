@@ -1,0 +1,10 @@
+{
+  "files.exclude": {
+    "**/.git": true,
+    "**/target": true,
+    "**/node_modules": true,
+    "**/*.lock": true,
+    "app/ui/build": true,
+    "app/ui/.svelte-kit": true
+  }
+}
